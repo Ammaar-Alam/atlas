@@ -158,6 +158,10 @@ def download_bars(
     start: str = typer.Option(..., help="ISO datetime, e.g. 2024-01-02T09:30:00-05:00"),
     end: str = typer.Option(..., help="ISO datetime, e.g. 2024-01-02T16:00:00-05:00"),
     timeframe: str = typer.Option("1Min", help="Bar timeframe, e.g. 1Min or 5Min"),
+    feed: str = typer.Option(
+        "delayed_sip",
+        help="Alpaca data feed: iex (live), delayed_sip (free, delayed), sip (paid).",
+    ),
     out: Optional[Path] = typer.Option(None, help="Optional explicit output CSV path"),
 ) -> None:
     settings = get_alpaca_settings(require_keys=True)
@@ -171,6 +175,7 @@ def download_bars(
         end=parse_iso_datetime(end),
         timeframe=timeframe,
         out_path=out,
+        feed=feed,
     )
 
 
@@ -193,6 +198,10 @@ def backtest(
     ),
     end: Optional[str] = typer.Option(
         None, help="ISO datetime (required for alpaca; optional filter otherwise)"
+    ),
+    alpaca_feed: str = typer.Option(
+        "delayed_sip",
+        help="When data-source=alpaca: iex (live), delayed_sip (free, delayed), sip (paid).",
     ),
     strategy: str = typer.Option("ma_crossover", help="Strategy name"),
     strategy_params: Optional[Path] = typer.Option(
@@ -237,6 +246,7 @@ def backtest(
             csv_path=csv_path,
             csv_dir=csv_dir,
             alpaca_settings=alpaca_settings,
+            alpaca_feed=alpaca_feed,
         )
     except FileNotFoundError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -299,6 +309,10 @@ def backtest(
 def paper(
     symbols: list[str] = typer.Option(["SPY"], help="Symbols to trade, repeatable"),
     bar_timeframe: str = typer.Option("1Min", help="Bar timeframe, e.g. 1Min or 5Min"),
+    alpaca_feed: str = typer.Option(
+        "iex",
+        help="Alpaca data feed for live bars: iex (live), delayed_sip (delayed), sip (paid).",
+    ),
     strategy: str = typer.Option("ma_crossover", help="Strategy name"),
     strategy_params: Optional[Path] = typer.Option(
         None, help="JSON file with strategy parameters"
@@ -335,6 +349,7 @@ def paper(
     cfg = PaperConfig(
         symbols=symbols,
         bar_timeframe=bar_timeframe,
+        alpaca_feed=alpaca_feed,
         lookback_bars=lookback_bars,
         poll_seconds=poll_seconds,
         max_position_notional_usd=float(max_position_notional_usd),

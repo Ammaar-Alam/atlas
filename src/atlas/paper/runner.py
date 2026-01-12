@@ -12,11 +12,13 @@ from threading import Event
 
 import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.enums import DataFeed
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from atlas.broker.alpaca_broker import assert_market_open, submit_market_order, trading_client, wait_for_fill
 from atlas.config import AlpacaSettings
+from atlas.data.alpaca_data import parse_alpaca_feed
 from atlas.data.bars import filter_regular_hours, parse_bar_timeframe
 from atlas.strategies.base import Strategy, StrategyState
 from atlas.utils.time import NY_TZ, now_ny
@@ -28,6 +30,7 @@ logger = logging.getLogger(__name__)
 class PaperConfig:
     symbols: list[str]
     bar_timeframe: str
+    alpaca_feed: str
     lookback_bars: int
     poll_seconds: int
     max_position_notional_usd: float
@@ -48,8 +51,10 @@ def _fetch_recent_bars(
     symbols: list[str],
     lookback_bars: int,
     timeframe: str,
+    feed: str,
 ) -> pd.DataFrame:
     tf = parse_bar_timeframe(timeframe)
+    data_feed: DataFeed = parse_alpaca_feed(feed)
     end = now_ny()
     start = end - timedelta(minutes=max(lookback_bars * tf.minutes * 2, 10))
     req = StockBarsRequest(
@@ -58,6 +63,7 @@ def _fetch_recent_bars(
         start=start,
         end=end,
         limit=max(lookback_bars, 10),
+        feed=data_feed,
     )
     res = client.get_stock_bars(req).df
     if res.index.tz is None:
@@ -186,6 +192,7 @@ def run_paper_loop(
                 symbols=cfg_symbols,
                 lookback_bars=cfg.lookback_bars,
                 timeframe=cfg.bar_timeframe,
+                feed=cfg.alpaca_feed,
             )
             if not isinstance(bars_df.index, pd.MultiIndex):
                 raise RuntimeError("expected multi-index bars response from alpaca")

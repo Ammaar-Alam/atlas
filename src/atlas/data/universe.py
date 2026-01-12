@@ -72,6 +72,7 @@ def load_universe_bars(
     csv_path: Optional[Path] = None,
     csv_dir: Optional[Path] = None,
     alpaca_settings: Optional[AlpacaSettings] = None,
+    alpaca_feed: str = "delayed_sip",
     regular_hours_only: bool = True,
 ) -> UniverseBars:
     if not symbols:
@@ -104,8 +105,9 @@ def load_universe_bars(
                 start=start,
                 end=end,
                 timeframe=timeframe.name,
+                feed=alpaca_feed,
             )
-        hint = f"{start.isoformat()} -> {end.isoformat()}"
+        hint = f"{start.isoformat()} -> {end.isoformat()} feed={alpaca_feed}"
     else:
         raise ValueError("data_source must be one of: sample, csv, alpaca")
 

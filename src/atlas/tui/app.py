@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
@@ -9,6 +10,7 @@ from threading import Event, Thread
 from typing import Optional
 
 import pandas as pd
+from rich.console import Group
 from rich.table import Table
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -33,6 +35,8 @@ class TuiState:
     end: Optional[str] = None
     timeframe: Optional[str] = None
     bar_timeframe: str = "1Min"
+    alpaca_feed: str = "delayed_sip"
+    paper_feed: str = "iex"
     strategy: str = "ma_crossover"
     fast_window: int = 10
     slow_window: int = 30
@@ -126,6 +130,11 @@ class AtlasTui(App):
         "/data sample",
         "/data csv",
         "/data alpaca",
+        "/feed iex",
+        "/feed delayed_sip",
+        "/feed sip",
+        "/paperfeed iex",
+        "/paperfeed delayed_sip",
         "/csv data/sample",
         "/symbol SPY",
         "/symbols SPY,QQQ",
@@ -169,7 +178,9 @@ class AtlasTui(App):
         self._ctrl_c_armed_at: Optional[float] = None
         self._paper_thread: Optional[Thread] = None
         self._paper_stop: Optional[Event] = None
+        self._paper_run_dir: Optional[Path] = None
         self._last_run_dir: Optional[Path] = None
+        self._last_live_decision_ts: Optional[str] = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -202,6 +213,7 @@ class AtlasTui(App):
         self.query_one("#input", Input).focus()
         self._render_settings()
         self._render_results(None)
+        self.set_interval(0.5, self._refresh_live_view)
 
     def action_help_quit(self) -> None:
         input_box = self.query_one("#input", Input)
@@ -248,6 +260,23 @@ class AtlasTui(App):
                 if base not in seen:
                     seen.add(base)
                     matches.append(base)
+            if matches:
+                max_lines = 8
+                cols = int(max(1, math.ceil(len(matches) / max_lines)))
+                rows = int(math.ceil(len(matches) / cols))
+                col_width = max(len(cmd) for cmd in matches) + 2
+                lines: list[str] = []
+                for r in range(rows):
+                    parts: list[str] = []
+                    for c in range(cols):
+                        idx = r + c * rows
+                        if idx < len(matches):
+                            parts.append(matches[idx].ljust(col_width))
+                    lines.append("".join(parts).rstrip())
+                suggestions.display = True
+                suggestions.styles.height = rows
+                suggestions.update("\n".join(lines))
+                return
         else:
             matches = [cmd for cmd in self.COMMANDS if cmd.startswith(value)]
         if not matches:
@@ -268,7 +297,8 @@ class AtlasTui(App):
         if cmd in {"/help", "/?"}:
             self._write_log(
                 "commands: /backtest, /paper start|stop, /timeframe <7d|6h|1m|1y|clear>, "
-                "/bar <1Min|5Min>, /algorithm <name>, /data <sample|csv|alpaca>, /csv <path>, "
+                "/bar <1Min|5Min>, /algorithm <name>, /data <sample|csv|alpaca>, "
+                "/feed <iex|delayed_sip|sip>, /paperfeed <iex|delayed_sip|sip>, /csv <path>, "
                 "/symbol <SPY>, /symbols <SPY,QQQ>, /start <iso>, /end <iso>, /save [path], /load [path]"
             )
             return
@@ -289,6 +319,24 @@ class AtlasTui(App):
                 self._write_log("data source must be sample|csv|alpaca")
                 return
             self.state.data_source = value
+            self._render_settings()
+            return
+
+        if cmd == "/feed" and args:
+            value = args[0].lower()
+            if value not in {"iex", "delayed_sip", "sip"}:
+                self._write_log("feed must be one of: iex | delayed_sip | sip")
+                return
+            self.state.alpaca_feed = value
+            self._render_settings()
+            return
+
+        if cmd == "/paperfeed" and args:
+            value = args[0].lower()
+            if value not in {"iex", "delayed_sip", "sip"}:
+                self._write_log("paperfeed must be one of: iex | delayed_sip | sip")
+                return
+            self.state.paper_feed = value
             self._render_settings()
             return
 
@@ -374,6 +422,7 @@ class AtlasTui(App):
         table.add_column("v")
         table.add_row("symbols", self.state.symbols)
         table.add_row("data_source", self.state.data_source)
+        table.add_row("alpaca_feed", self.state.alpaca_feed)
         table.add_row("csv_path", self.state.csv_path or "-")
         table.add_row("timeframe", self.state.timeframe or "-")
         table.add_row("bar_timeframe", self.state.bar_timeframe)
@@ -398,6 +447,7 @@ class AtlasTui(App):
             "paper_max_notional",
             f"{self.state.paper_max_position_notional_usd:.2f}",
         )
+        table.add_row("paper_feed", self.state.paper_feed)
         table.add_row("paper_dry_run", str(self.state.paper_dry_run))
 
         self.query_one("#settings", Static).update(table)
@@ -413,6 +463,148 @@ class AtlasTui(App):
             widget.update(table)
             return
         widget.update(summary)
+
+    def _tail_last_jsonl(self, path: Path) -> Optional[dict]:
+        if not path.exists():
+            return None
+        try:
+            with path.open("rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                if size <= 0:
+                    return None
+                read_size = min(size, 131072)
+                f.seek(-read_size, 2)
+                chunk = f.read().decode("utf-8", errors="ignore")
+        except OSError:
+            chunk = path.read_text(errors="ignore")
+        lines = [ln for ln in chunk.splitlines() if ln.strip()]
+        if not lines:
+            return None
+        try:
+            return json.loads(lines[-1])
+        except json.JSONDecodeError:
+            return None
+
+    def _render_paper_live(self, decision: dict) -> None:
+        results = self.query_one("#results", Static)
+        results.border_title = "Paper (live)"
+
+        ts = str(decision.get("timestamp", ""))
+        targets = decision.get("targets", {}) or {}
+        positions = decision.get("positions", {}) or {}
+        debug = decision.get("debug", {}) or {}
+
+        summary = Table(show_header=False)
+        summary.add_column("k", style="bold")
+        summary.add_column("v")
+        summary.add_row("run_dir", str(self._paper_run_dir) if self._paper_run_dir else "-")
+        summary.add_row("timestamp", ts or "-")
+        summary.add_row("strategy", self.state.strategy)
+        summary.add_row("symbols", self.state.symbols)
+        summary.add_row("bar_timeframe", self.state.bar_timeframe)
+        summary.add_row("paper_feed", self.state.paper_feed)
+        summary.add_row("reason", str(decision.get("reason") or "-"))
+        summary.add_row(
+            "targets",
+            "  ".join(f"{k}={float(v):+.2f}" for k, v in targets.items()) if targets else "-",
+        )
+        summary.add_row(
+            "positions",
+            "  ".join(f"{k}={float(v):+.4f}" for k, v in positions.items()) if positions else "-",
+        )
+        if "equity" in decision:
+            summary.add_row("equity", f"{float(decision['equity']):.2f}")
+        if "cash" in decision:
+            summary.add_row("cash", f"{float(decision['cash']):.2f}")
+
+        gates = Table(show_header=False)
+        gates.add_column("k", style="bold")
+        gates.add_column("v")
+        if "rho" in debug:
+            gates.add_row("rho", f"{float(debug['rho']):.3f}")
+        if "agree" in debug:
+            gates.add_row("agree", str(bool(debug["agree"])))
+        if "strength" in debug:
+            gates.add_row("strength", f"{float(debug['strength']):.3f}")
+        if "vol_ratio_max" in debug:
+            gates.add_row("vol_ratio_max", f"{float(debug['vol_ratio_max']):.3f}")
+        if "chosen" in debug:
+            gates.add_row("chosen", str(debug["chosen"]))
+        if "chosen_netEdge_bps" in debug:
+            gates.add_row("netEdge_bps", f"{float(debug['chosen_netEdge_bps']):.3f}")
+        if "dir" in debug:
+            gates.add_row("dir", str(int(debug["dir"])))
+        if "expMove_bps" in debug and isinstance(debug["expMove_bps"], dict):
+            gates.add_row(
+                "expMove_bps",
+                "  ".join(f"{k}={float(v):.2f}" for k, v in debug["expMove_bps"].items()),
+            )
+        if "costRT_bps" in debug and isinstance(debug["costRT_bps"], dict):
+            gates.add_row(
+                "costRT_bps",
+                "  ".join(f"{k}={float(v):.2f}" for k, v in debug["costRT_bps"].items()),
+            )
+        if "netEdge_bps" in debug and isinstance(debug["netEdge_bps"], dict):
+            gates.add_row(
+                "netEdge_bps_all",
+                "  ".join(f"{k}={float(v):.2f}" for k, v in debug["netEdge_bps"].items()),
+            )
+
+        if "spy" in debug and isinstance(debug["spy"], dict):
+            spy = debug["spy"]
+            gates.add_row(
+                "SPY score/m/v",
+                f"{float(spy.get('score', 0.0)):+.3f}  {float(spy.get('m', 0.0)):+.6f}  {float(spy.get('v', 0.0)):.6f}",
+            )
+            gates.add_row(
+                "SPY vwap_dev/volr",
+                f"{float(spy.get('vwap_dev', 0.0)):+.4f}  {float(spy.get('vol_ratio', 0.0)):.3f}",
+            )
+        if "qqq" in debug and isinstance(debug["qqq"], dict):
+            qqq = debug["qqq"]
+            gates.add_row(
+                "QQQ score/m/v",
+                f"{float(qqq.get('score', 0.0)):+.3f}  {float(qqq.get('m', 0.0)):+.6f}  {float(qqq.get('v', 0.0)):.6f}",
+            )
+            gates.add_row(
+                "QQQ vwap_dev/volr",
+                f"{float(qqq.get('vwap_dev', 0.0)):+.4f}  {float(qqq.get('vol_ratio', 0.0)):.3f}",
+            )
+
+        last_order = None
+        last_fill = None
+        if self._paper_run_dir:
+            last_order = self._tail_last_jsonl(self._paper_run_dir / "orders.jsonl")
+            last_fill = self._tail_last_jsonl(self._paper_run_dir / "fills.jsonl")
+
+        tape = Table(show_header=False)
+        tape.add_column("k", style="bold")
+        tape.add_column("v")
+        if last_order:
+            tape.add_row(
+                "last_order",
+                f"{last_order.get('symbol')} {last_order.get('side')} qty={last_order.get('qty')} id={last_order.get('order_id')}",
+            )
+        if last_fill:
+            tape.add_row(
+                "last_fill",
+                f"{last_fill.get('symbol')} {last_fill.get('side')} qty={last_fill.get('filled_qty')} px={last_fill.get('filled_avg_price')} status={last_fill.get('status')}",
+            )
+
+        results.update(Group(summary, "", gates, "", tape))
+
+    def _refresh_live_view(self) -> None:
+        if self._paper_run_dir is None:
+            return
+        decision = self._tail_last_jsonl(self._paper_run_dir / "decisions.jsonl")
+        if not decision:
+            return
+        ts = str(decision.get("timestamp", ""))
+        if ts and ts == self._last_live_decision_ts:
+            return
+        self._last_live_decision_ts = ts
+        self._render_paper_live(decision)
 
     def _run_backtest(self) -> None:
         self._write_log("running backtest...")
@@ -466,6 +658,7 @@ class AtlasTui(App):
             csv_path=csv_file,
             csv_dir=csv_dir,
             alpaca_settings=alpaca_settings,
+            alpaca_feed=self.state.alpaca_feed,
         )
         data_hint = universe.hint
         bars_by_symbol = universe.bars_by_symbol
@@ -574,6 +767,20 @@ class AtlasTui(App):
             / f"tui_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         )
         run_dir.mkdir(parents=True, exist_ok=True)
+        self._paper_run_dir = run_dir
+        self._last_live_decision_ts = None
+
+        placeholder = Table(show_header=False)
+        placeholder.add_column("k", style="bold")
+        placeholder.add_column("v")
+        placeholder.add_row("status", "starting paper loop…")
+        placeholder.add_row("run_dir", str(run_dir))
+        placeholder.add_row("symbols", self.state.symbols)
+        placeholder.add_row("bar_timeframe", self.state.bar_timeframe)
+        placeholder.add_row("strategy", self.state.strategy)
+        results = self.query_one("#results", Static)
+        results.border_title = "Paper (live)"
+        results.update(placeholder)
 
         strat = build_strategy(
             name=self.state.strategy,
@@ -585,6 +792,7 @@ class AtlasTui(App):
         cfg = PaperConfig(
             symbols=[s.strip().upper() for s in self.state.symbols.split(",") if s.strip()],
             bar_timeframe=self.state.bar_timeframe,
+            alpaca_feed=self.state.paper_feed,
             lookback_bars=self.state.paper_lookback_bars,
             poll_seconds=self.state.paper_poll_seconds,
             max_position_notional_usd=self.state.paper_max_position_notional_usd,

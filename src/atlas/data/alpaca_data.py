@@ -8,6 +8,7 @@ from typing import Optional
 
 import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.enums import DataFeed
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
@@ -24,13 +25,32 @@ class AlpacaBarsDownload:
     start: datetime
     end: datetime
     timeframe: str
+    feed: str
 
 
 def _bars_cache_path(root: Path, req: AlpacaBarsDownload) -> Path:
     safe_symbol = req.symbol.replace("/", "_")
     start_s = req.start.isoformat().replace(":", "").replace("+", "")
     end_s = req.end.isoformat().replace(":", "").replace("+", "")
-    return root / "data" / "alpaca" / safe_symbol / f"{safe_symbol}_{req.timeframe}_{start_s}_{end_s}.csv"
+    feed = (req.feed or "iex").replace("/", "_")
+    return (
+        root
+        / "data"
+        / "alpaca"
+        / safe_symbol
+        / f"{safe_symbol}_{req.timeframe}_{feed}_{start_s}_{end_s}.csv"
+    )
+
+
+def parse_alpaca_feed(value: str) -> DataFeed:
+    value = value.strip().lower()
+    if value in {"iex"}:
+        return DataFeed.IEX
+    if value in {"sip"}:
+        return DataFeed.SIP
+    if value in {"delayed_sip", "delayed-sip", "delayedsip"}:
+        return DataFeed.DELAYED_SIP
+    raise ValueError("alpaca feed must be one of: iex, delayed_sip, sip")
 
 
 def _normalize_bars_df(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -57,8 +77,10 @@ def download_stock_bars_to_csv(
     end: datetime,
     timeframe: str,
     out_path: Optional[Path],
+    feed: str = "delayed_sip",
 ) -> Path:
     tf = parse_bar_timeframe(timeframe)
+    data_feed = parse_alpaca_feed(feed)
 
     client = StockHistoricalDataClient(
         settings.api_key, settings.secret_key, url_override=settings.data_url_override
@@ -68,14 +90,25 @@ def download_stock_bars_to_csv(
         timeframe=TimeFrame(amount=tf.minutes, unit=TimeFrameUnit.Minute),
         start=start,
         end=end,
+        feed=data_feed,
     )
 
     logger.info("downloading bars from alpaca: %s %s -> %s", symbol, start, end)
-    res = client.get_stock_bars(req)
+    try:
+        res = client.get_stock_bars(req)
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "subscription" in msg and "sip" in msg and data_feed == DataFeed.SIP:
+            raise RuntimeError(
+                "alpaca sip feed not available for this account. use feed=delayed_sip (free, delayed) or feed=iex (live, limited)."
+            ) from exc
+        raise
     bars = _normalize_bars_df(res.df, symbol)
 
     if out_path is None:
-        out_path = _bars_cache_path(Path.cwd(), AlpacaBarsDownload(symbol, start, end, timeframe))
+        out_path = _bars_cache_path(
+            Path.cwd(), AlpacaBarsDownload(symbol, start, end, timeframe, data_feed.value)
+        )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     export = bars.copy()
@@ -92,9 +125,13 @@ def load_stock_bars_cached(
     start: datetime,
     end: datetime,
     timeframe: str,
+    feed: str = "delayed_sip",
 ) -> pd.DataFrame:
     _ = parse_bar_timeframe(timeframe)
-    path = _bars_cache_path(Path.cwd(), AlpacaBarsDownload(symbol, start, end, timeframe))
+    data_feed = parse_alpaca_feed(feed)
+    path = _bars_cache_path(
+        Path.cwd(), AlpacaBarsDownload(symbol, start, end, timeframe, data_feed.value)
+    )
     if path.exists():
         logger.info("using cached bars: %s", path)
         df = pd.read_csv(path)
@@ -110,6 +147,7 @@ def load_stock_bars_cached(
         end=end,
         timeframe=timeframe,
         out_path=path,
+        feed=data_feed.value,
     )
     df = pd.read_csv(path)
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="raise")
