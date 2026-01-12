@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import pandas as pd
 import typer
+from rich.console import Console
+from rich.table import Table
 
 from atlas.backtest.engine import BacktestConfig, run_backtest
 from atlas.config import (
@@ -18,14 +23,132 @@ from atlas.data.csv_loader import load_bars_csv
 from atlas.logging_utils import setup_logging
 from atlas.paper.runner import PaperConfig, run_paper_loop
 from atlas.strategies.registry import build_strategy
+from atlas.tui.app import run_tui
 from atlas.utils.time import parse_iso_datetime
 
 app = typer.Typer(add_completion=False)
 logger = logging.getLogger(__name__)
 
 
+def _infer_bar_minutes(index: pd.DatetimeIndex) -> float:
+    if len(index) < 3:
+        return 0.0
+    diffs = index.to_series().diff().dropna().dt.total_seconds() / 60.0
+    median = float(diffs.median())
+    return median if median > 0 else 0.0
+
+
+def _print_backtest_summary(
+    *,
+    run_dir: Path,
+    symbol: str,
+    data_source: str,
+    data_hint: str,
+    bars: pd.DataFrame,
+    strategy_name: str,
+    strategy_params_hint: str,
+    warmup_bars: int,
+    cfg: BacktestConfig,
+    elapsed_s: float,
+) -> None:
+    metrics = json.loads((run_dir / "metrics.json").read_text())
+
+    equity_curve = pd.read_csv(run_dir / "equity_curve.csv", parse_dates=["timestamp"])
+    final_equity = float(equity_curve["equity"].iloc[-1])
+
+    trades_path = run_dir / "trades.csv"
+    trades = pd.read_csv(trades_path) if trades_path.exists() else pd.DataFrame()
+    gross_notional = (
+        float(trades["notional"].sum())
+        if len(trades) and "notional" in trades.columns
+        else 0.0
+    )
+
+    start_ts = pd.Timestamp(bars.index[0])
+    end_ts = pd.Timestamp(bars.index[-1])
+    duration = end_ts - start_ts
+    bar_minutes = _infer_bar_minutes(bars.index)
+    days = int(pd.Series(bars.index.date).nunique())
+
+    try:
+        _ = Table
+    except Exception:
+        typer.echo(f"run_dir: {run_dir}")
+        typer.echo(f"symbol: {symbol}")
+        typer.echo(f"data: {data_source} ({data_hint})")
+        typer.echo(f"window: {start_ts.isoformat()} -> {end_ts.isoformat()}")
+        typer.echo(f"bars: {len(bars)} days: {days} bar: {bar_minutes:.2f}m duration: {duration}")
+        typer.echo(f"strategy: {strategy_name} ({strategy_params_hint}) warmup_bars={warmup_bars}")
+        typer.echo(
+            "config: "
+            f"initial_cash={cfg.initial_cash:.2f} "
+            f"max_notional={cfg.max_position_notional_usd:.2f} "
+            f"slippage_bps={cfg.slippage_bps:.2f} "
+            f"allow_short={cfg.allow_short}"
+        )
+        typer.echo(
+            "results: "
+            f"final_equity={final_equity:.2f} "
+            f"total_return={metrics['total_return']:.4%} "
+            f"max_drawdown={metrics['max_drawdown']:.4%} "
+            f"sharpe={metrics['sharpe']:.2f} "
+            f"fills={metrics['trades']} "
+            f"gross_notional={gross_notional:.2f}"
+        )
+        typer.echo(f"elapsed: {elapsed_s:.2f}s")
+        return
+
+    console = Console()
+    table = Table(title="Backtest summary", show_header=False)
+    table.add_column("k", style="bold")
+    table.add_column("v")
+
+    table.add_row("run_dir", str(run_dir))
+    table.add_row("symbol", symbol)
+    table.add_row("data", f"{data_source} ({data_hint})")
+    table.add_row(
+        "window",
+        f"{start_ts.isoformat()} → {end_ts.isoformat()}  |  bars={len(bars)}  days={days}  bar={bar_minutes:.2f}m",
+    )
+    table.add_row("duration", str(duration))
+    table.add_row("strategy", f"{strategy_name} ({strategy_params_hint})")
+    table.add_row("warmup_bars", str(warmup_bars))
+    table.add_row(
+        "config",
+        "  ".join(
+            [
+                f"initial_cash={cfg.initial_cash:.2f}",
+                f"max_notional={cfg.max_position_notional_usd:.2f}",
+                f"slippage_bps={cfg.slippage_bps:.2f}",
+                f"allow_short={cfg.allow_short}",
+            ]
+        ),
+    )
+    table.add_row(
+        "results",
+        "  ".join(
+            [
+                f"final_equity={final_equity:.2f}",
+                f"total_return={metrics['total_return']:.4%}",
+                f"max_drawdown={metrics['max_drawdown']:.4%}",
+                f"sharpe={metrics['sharpe']:.2f}",
+                f"fills={metrics['trades']}",
+                f"gross_notional={gross_notional:.2f}",
+            ]
+        ),
+    )
+    table.add_row("elapsed", f"{elapsed_s:.2f}s")
+
+    console.print(table)
+
+
 def _run_id(prefix: str) -> str:
     return datetime.now().strftime(f"{prefix}_%Y%m%d_%H%M%S")
+
+
+@app.command()
+def tui() -> None:
+    run_tui()
 
 
 @app.command()
@@ -57,8 +180,12 @@ def backtest(
         "sample", help="sample|csv|alpaca", show_default=True
     ),
     csv_path: Optional[Path] = typer.Option(None, help="CSV path when data-source=csv"),
-    start: Optional[str] = typer.Option(None, help="ISO datetime for alpaca data"),
-    end: Optional[str] = typer.Option(None, help="ISO datetime for alpaca data"),
+    start: Optional[str] = typer.Option(
+        None, help="ISO datetime (required for alpaca; optional filter otherwise)"
+    ),
+    end: Optional[str] = typer.Option(
+        None, help="ISO datetime (required for alpaca; optional filter otherwise)"
+    ),
     strategy: str = typer.Option("ma_crossover", help="Strategy name"),
     strategy_params: Optional[Path] = typer.Option(
         None, help="JSON file with strategy parameters"
@@ -78,15 +205,20 @@ def backtest(
     if max_position_notional_usd is None:
         max_position_notional_usd = get_default_max_position_notional_usd(mode="backtest")
 
+    start_dt = parse_iso_datetime(start) if start is not None else None
+    end_dt = parse_iso_datetime(end) if end is not None else None
+
     if data_source == "sample":
         sample_path = Path("data") / "sample" / f"{symbol}_1min_sample.csv"
         if not sample_path.exists():
             raise typer.BadParameter(f"missing sample data for {symbol}: {sample_path}")
         bars = load_bars_csv(sample_path)
+        data_hint = str(sample_path)
     elif data_source == "csv":
         if csv_path is None:
             raise typer.BadParameter("csv-path is required when data-source=csv")
         bars = load_bars_csv(csv_path)
+        data_hint = str(csv_path)
     elif data_source == "alpaca":
         if start is None or end is None:
             raise typer.BadParameter("start and end are required when data-source=alpaca")
@@ -94,12 +226,20 @@ def backtest(
         bars = load_stock_bars_cached(
             settings=settings,
             symbol=symbol,
-            start=parse_iso_datetime(start),
-            end=parse_iso_datetime(end),
+            start=start_dt,
+            end=end_dt,
             timeframe="1Min",
         )
+        data_hint = f"{start_dt.isoformat()} -> {end_dt.isoformat()}"
     else:
         raise typer.BadParameter("data-source must be one of: sample, csv, alpaca")
+
+    if start_dt is not None:
+        bars = bars[bars.index >= start_dt]
+    if end_dt is not None:
+        bars = bars[bars.index <= end_dt]
+    if len(bars) < 3:
+        raise typer.BadParameter("backtest window has too few bars after filtering")
 
     strat = build_strategy(
         name=strategy,
@@ -116,7 +256,27 @@ def backtest(
         allow_short=allow_short,
     )
 
+    t0 = time.perf_counter()
     run_backtest(bars=bars, strategy=strat, cfg=cfg, run_dir=run_dir)
+    elapsed_s = time.perf_counter() - t0
+
+    strategy_params_hint = (
+        f"params={strategy_params}"
+        if strategy_params is not None
+        else f"fast={fast_window} slow={slow_window}"
+    )
+    _print_backtest_summary(
+        run_dir=run_dir,
+        symbol=symbol,
+        data_source=data_source,
+        data_hint=data_hint,
+        bars=bars,
+        strategy_name=strategy,
+        strategy_params_hint=strategy_params_hint,
+        warmup_bars=strat.warmup_bars(),
+        cfg=cfg,
+        elapsed_s=elapsed_s,
+    )
 
 
 @app.command()

@@ -21,6 +21,7 @@ AGENTS.*
 .env.*.local
 !.env.example
 .venv
+.atlas_tui.json
 
 # Dependencies
 node_modules/

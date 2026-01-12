@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Iterable, Optional
+from threading import Event
 
 import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
@@ -79,6 +80,7 @@ def run_paper_loop(
     cfg: PaperConfig,
     run_dir: Path,
     max_loops: Optional[int],
+    stop_event: Optional[Event] = None,
 ) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     orders_path = run_dir / "orders.csv"
@@ -127,6 +129,9 @@ def run_paper_loop(
         loops = 0
 
         while True:
+            if stop_event is not None and stop_event.is_set():
+                logger.info("stop requested, exiting paper loop")
+                return
             if max_loops is not None and loops >= max_loops:
                 logger.info("max loops reached, stopping")
                 return
@@ -135,6 +140,9 @@ def run_paper_loop(
                 assert_market_open(trade_client)
 
             for symbol in cfg.symbols:
+                if stop_event is not None and stop_event.is_set():
+                    logger.info("stop requested, exiting paper loop")
+                    return
                 bars = _fetch_recent_minute_bars(
                     client=data_client, symbol=symbol, lookback_bars=cfg.lookback_bars
                 )
@@ -225,4 +233,9 @@ def run_paper_loop(
             sleep_s = _align_to_next_minute(pd.Timestamp.now(tz=NY_TZ))
             sleep_s = max(sleep_s, float(cfg.poll_seconds))
             logger.info("sleeping %.1fs", sleep_s)
-            time.sleep(sleep_s)
+            if stop_event is not None:
+                if stop_event.wait(sleep_s):
+                    logger.info("stop requested, exiting paper loop")
+                    return
+            else:
+                time.sleep(sleep_s)

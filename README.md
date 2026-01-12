@@ -101,6 +101,14 @@ atlas download-bars --help
 atlas tui
 ```
 
+`atlas tui` launches a full-screen terminal UI with live settings/results panels. Use slash commands such as:
+
+- `/backtest`
+- `/timeframe 7d` (also supports `6h`, `1m`, `1y`, `clear`)
+- `/algorithm ma_crossover`
+- `/paper start` / `/paper stop`
+- `/save` / `/load`
+
 ## Data sources
 
 Backtests can use:
