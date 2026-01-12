@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
@@ -14,7 +15,6 @@ from rich.table import Table
 from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.suggester import SuggestFromList
 from textual.widgets import Header, Input, Log, Static
 
 from atlas.backtest.engine import BacktestConfig, run_backtest
@@ -22,7 +22,7 @@ from atlas.config import get_alpaca_settings, get_default_max_position_notional_
 from atlas.data.bars import parse_bar_timeframe
 from atlas.data.universe import load_universe_bars
 from atlas.paper.runner import PaperConfig, run_paper_loop
-from atlas.strategies.registry import build_strategy
+from atlas.strategies.registry import build_strategy, list_strategy_names
 from atlas.utils.time import now_ny, parse_iso_datetime
 
 
@@ -124,40 +124,56 @@ def _resolve_time_window(
 
 
 class AtlasTui(App):
-    COMMANDS = [
+    SUGGESTION_MAX_LINES = 8
+    COMMAND_ALIASES = {
+        "/?": "/help",
+        "/bars": "/bar",
+        "/strategy": "/algorithm",
+        "/aglorithm": "/algorithm",
+        "/algorithim": "/algorithm",
+        "/initialcash": "/cash",
+        "/initial_cash": "/cash",
+        "/max": "/maxnotional",
+        "/notional": "/maxnotional",
+        "/max_notional": "/maxnotional",
+        "/slip": "/slippage",
+        "/allowshort": "/short",
+        "/allow_short": "/short",
+        "/paperlookbackbars": "/paperlookback",
+        "/paperpolls": "/paperpoll",
+        "/papermax": "/papermaxnotional",
+    }
+    BASE_COMMANDS = [
         "/help",
+        "/?",
         "/backtest",
-        "/paper start",
-        "/paper stop",
-        "/timeframe 7d",
-        "/timeframe 6h",
-        "/timeframe 1m",
-        "/timeframe 1y",
-        "/timeframe clear",
-        "/bar 1Min",
-        "/bar 5Min",
-        "/algorithm ma_crossover",
-        "/algorithm nec_x",
-        "/data sample",
-        "/data csv",
-        "/data alpaca",
-        "/feed iex",
-        "/feed delayed_sip",
-        "/feed sip",
-        "/paperfeed iex",
-        "/paperfeed delayed_sip",
-        "/paperclosed true",
-        "/paperclosed false",
-        "/paperrth true",
-        "/paperrth false",
-        "/paperlimitbps 5",
-        "/paperdry true",
-        "/paperdry false",
-        "/csv data/sample",
-        "/symbol SPY",
-        "/symbols SPY,QQQ",
-        "/start 2024-01-02T09:30:00-05:00",
-        "/end 2024-01-02T16:00:00-05:00",
+        "/paper",
+        "/timeframe",
+        "/bar",
+        "/bars",
+        "/algorithm",
+        "/strategy",
+        "/fast",
+        "/slow",
+        "/cash",
+        "/maxnotional",
+        "/slippage",
+        "/short",
+        "/data",
+        "/feed",
+        "/paperfeed",
+        "/paperlookback",
+        "/paperpoll",
+        "/papermaxnotional",
+        "/paperclosed",
+        "/paperrth",
+        "/paperlimitbps",
+        "/paperdry",
+        "/csv",
+        "/symbol",
+        "/symbols",
+        "/start",
+        "/end",
         "/save",
         "/load",
     ]
@@ -166,10 +182,9 @@ class AtlasTui(App):
     #body { height: 1fr; }
     #settings { width: 38%; border: solid $accent; padding: 1; }
     #results { width: 62%; border: solid $accent; padding: 1; }
-    #lower { height: 13; border: solid $accent; padding: 1; }
+    #lower { height: 18; border: solid $accent; padding: 1; }
     #log { height: 1fr; background: $surface; }
     #suggestions {
-        dock: bottom;
         height: 0;
         max-height: 8;
         border: none;
@@ -179,7 +194,7 @@ class AtlasTui(App):
         background: $surface;
         overflow-y: auto;
     }
-    #input { dock: bottom; height: 3; border: solid $accent; padding: 0 1; }
+    #input { height: 3; border: solid $accent; padding: 0 1; }
     Input > .input--suggestion { color: $text-muted; text-style: dim; }
     """
 
@@ -201,6 +216,118 @@ class AtlasTui(App):
         self._last_live_decision_ts: Optional[str] = None
         self._suggestion_matches: list[str] = []
         self._suggestion_index: int = 0
+        self._suggestion_scroll: int = 0
+        self._config_path = Path(os.getenv("ATLAS_TUI_CONFIG", ".atlas_tui.json"))
+        self._autosave_enabled = True
+        self._config_load_failed = False
+
+    def _load_config(self) -> None:
+        path = self._config_path
+        if not path.exists():
+            self._config_load_failed = False
+            return
+        try:
+            raw = json.loads(path.read_text())
+            self.state = TuiState.from_dict(raw)
+            self._config_load_failed = False
+        except Exception as exc:
+            self._config_load_failed = True
+            self._autosave_enabled = False
+            self._write_log(f"failed to load config ({path}): {exc}")
+
+    def _save_config(self) -> None:
+        if not self._autosave_enabled or self._config_load_failed:
+            return
+        path = self._config_path
+        try:
+            path.write_text(json.dumps(self.state.to_dict(), indent=2))
+        except Exception as exc:
+            self._autosave_enabled = False
+            self._write_log(f"failed to save config ({path}): {exc}")
+
+    def _canonicalize_command(self, token: str) -> str:
+        token = token.strip().lower()
+        return self.COMMAND_ALIASES.get(token, token)
+
+    def _arg_options(self, command: str) -> list[str]:
+        cmd = self._canonicalize_command(command)
+        if cmd == "/paper":
+            return ["start", "stop"]
+        if cmd == "/fast":
+            return ["5", "10", "20"]
+        if cmd == "/slow":
+            return ["20", "30", "50", "100"]
+        if cmd == "/cash":
+            return ["10000", "50000", "100000", "250000"]
+        if cmd == "/maxnotional":
+            return ["1000", "5000", "10000", "25000", "100000"]
+        if cmd == "/slippage":
+            return ["0", "0.5", "1.25", "2.0", "5.0"]
+        if cmd == "/short":
+            return ["true", "false"]
+        if cmd == "/data":
+            return ["sample", "csv", "alpaca"]
+        if cmd in {"/feed", "/paperfeed"}:
+            return ["iex", "delayed_sip", "sip"]
+        if cmd == "/paperlookback":
+            return ["50", "100", "200", "500"]
+        if cmd == "/paperpoll":
+            return ["5", "15", "30", "60"]
+        if cmd == "/papermaxnotional":
+            return ["1000", "5000", "10000"]
+        if cmd in {"/paperclosed", "/paperrth", "/paperdry"}:
+            return ["true", "false"]
+        if cmd == "/paperlimitbps":
+            return ["0", "1", "5", "10", "25"]
+        if cmd == "/bar":
+            return ["1Min", "5Min"]
+        if cmd == "/algorithm":
+            return list_strategy_names()
+        if cmd == "/timeframe":
+            return ["6h", "7d", "30d", "180d", "1y", "clear"]
+        if cmd == "/csv":
+            return ["data/sample"]
+        if cmd == "/symbol":
+            return ["SPY", "QQQ"]
+        if cmd == "/symbols":
+            return ["SPY,QQQ"]
+        return []
+
+    def _compute_suggestions(self, raw: str) -> list[str]:
+        raw = raw.rstrip("\n")
+        raw_l = raw.lstrip()
+        if not raw_l.startswith("/"):
+            return []
+
+        ends_with_ws = bool(raw_l) and raw_l[-1].isspace()
+        tokens = raw_l.strip().split()
+        if not tokens:
+            return []
+
+        cmd_token = tokens[0]
+        cmd = self._canonicalize_command(cmd_token)
+        base_prefix = cmd_token.strip().lower()
+        known_base = {self._canonicalize_command(c) for c in self.BASE_COMMANDS}
+
+        # If user has typed more than one arg and then whitespace, we intentionally stop.
+        if len(tokens) >= 2 and ends_with_ws:
+            return []
+
+        # Completing the command itself (no args yet).
+        if len(tokens) == 1 and cmd not in known_base:
+            return [c for c in self.BASE_COMMANDS if c.startswith(base_prefix)]
+
+        # Completing the first arg for a known command.
+        options = self._arg_options(cmd)
+        if not options:
+            return []
+
+        arg_prefix = ""
+        if len(tokens) >= 2:
+            arg_prefix = tokens[1].strip().lower()
+
+        matches = [o for o in options if o.lower().startswith(arg_prefix)]
+        return [f"{cmd_token.strip()} {m}" for m in matches]
 
     def on_key(self, event: events.Key) -> None:
         input_box = self.query_one("#input", Input)
@@ -249,7 +376,6 @@ class AtlasTui(App):
             cmd = Input(
                 id="input",
                 placeholder="/help",
-                suggester=SuggestFromList(self.COMMANDS, case_sensitive=False),
             )
             cmd.border_title = "Command"
             yield cmd
@@ -261,9 +387,13 @@ class AtlasTui(App):
         suggestions = self.query_one("#suggestions", Static)
         suggestions.display = False
         self.query_one("#input", Input).focus()
+        self._load_config()
         self._render_settings()
         self._render_results(None)
         self.set_interval(0.5, self._refresh_live_view)
+
+    def on_unmount(self) -> None:
+        self._save_config()
 
     def action_help_quit(self) -> None:
         input_box = self.query_one("#input", Input)
@@ -298,6 +428,7 @@ class AtlasTui(App):
         suggestions = self.query_one("#suggestions", Static)
         self._suggestion_matches = []
         self._suggestion_index = 0
+        self._suggestion_scroll = 0
         suggestions.styles.height = 0
         suggestions.update("")
         suggestions.display = False
@@ -308,14 +439,22 @@ class AtlasTui(App):
             self._clear_suggestions()
             return
 
-        matches = self._suggestion_matches[:8]
-        self._suggestion_index = max(
-            0, min(int(self._suggestion_index), len(matches) - 1)
-        )
+        matches = self._suggestion_matches
+        self._suggestion_index = max(0, min(int(self._suggestion_index), len(matches) - 1))
+
+        max_lines = int(self.SUGGESTION_MAX_LINES)
+        if self._suggestion_index < self._suggestion_scroll:
+            self._suggestion_scroll = self._suggestion_index
+        if self._suggestion_index >= self._suggestion_scroll + max_lines:
+            self._suggestion_scroll = self._suggestion_index - max_lines + 1
+        self._suggestion_scroll = max(0, min(int(self._suggestion_scroll), max(len(matches) - 1, 0)))
+
+        window = matches[self._suggestion_scroll : self._suggestion_scroll + max_lines]
 
         lines: list[str] = []
-        for idx, cmd in enumerate(matches):
-            prefix = "> " if idx == self._suggestion_index else "  "
+        for idx, cmd in enumerate(window):
+            global_idx = self._suggestion_scroll + idx
+            prefix = "> " if global_idx == self._suggestion_index else "  "
             lines.append(prefix + cmd)
 
         suggestions.display = True
@@ -323,26 +462,18 @@ class AtlasTui(App):
         suggestions.update("\n".join(lines))
 
     def _update_suggestions(self, value: str) -> None:
-        value = value.strip()
-        if not value.startswith("/"):
+        raw = value
+        if not raw.lstrip().startswith("/"):
             self._clear_suggestions()
             return
-        if value == "/":
-            matches: list[str] = []
-            seen: set[str] = set()
-            for cmd in self.COMMANDS:
-                base = cmd.split()[0]
-                if base not in seen:
-                    seen.add(base)
-                    matches.append(base)
-        else:
-            matches = [cmd for cmd in self.COMMANDS if cmd.startswith(value)]
+
+        matches = self._compute_suggestions(raw)
         if not matches:
             self._clear_suggestions()
             return
-        matches = matches[:8]
         if matches != self._suggestion_matches:
             self._suggestion_index = 0
+            self._suggestion_scroll = 0
         self._suggestion_matches = matches
         self._render_suggestions()
 
@@ -355,7 +486,9 @@ class AtlasTui(App):
             self._write_log(
                 "commands: /backtest, /paper start|stop, /timeframe <7d|6h|1m|1y|clear>, "
                 "/bar <1Min|5Min>, /algorithm <name>, /data <sample|csv|alpaca>, "
+                "/fast <int>, /slow <int>, /cash <usd>, /maxnotional <usd>, /slippage <bps>, /short <true|false>, "
                 "/feed <iex|delayed_sip|sip>, /paperfeed <iex|delayed_sip|sip>, /csv <path>, "
+                "/paperlookback <bars>, /paperpoll <seconds>, /papermaxnotional <usd>, "
                 "/paperclosed <true|false>, /paperrth <true|false>, /paperlimitbps <float>, /paperdry <true|false>, "
                 "/symbol <SPY>, /symbols <SPY,QQQ>, /start <iso>, /end <iso>, /save [path], /load [path]"
             )
@@ -398,6 +531,80 @@ class AtlasTui(App):
             self._render_settings()
             return
 
+        if cmd == "/fast" and args:
+            try:
+                value = int(args[0])
+            except ValueError:
+                self._write_log("fast must be an integer")
+                return
+            if value <= 0:
+                self._write_log("fast must be > 0")
+                return
+            self.state.fast_window = value
+            self._render_settings()
+            return
+
+        if cmd == "/slow" and args:
+            try:
+                value = int(args[0])
+            except ValueError:
+                self._write_log("slow must be an integer")
+                return
+            if value <= 0:
+                self._write_log("slow must be > 0")
+                return
+            self.state.slow_window = value
+            self._render_settings()
+            return
+
+        if cmd == "/cash" and args:
+            try:
+                value = float(args[0])
+            except ValueError:
+                self._write_log("cash must be a number (usd)")
+                return
+            if value <= 0:
+                self._write_log("cash must be > 0")
+                return
+            self.state.initial_cash = value
+            self._render_settings()
+            return
+
+        if cmd == "/maxnotional" and args:
+            try:
+                value = float(args[0])
+            except ValueError:
+                self._write_log("maxnotional must be a number (usd)")
+                return
+            if value <= 0:
+                self._write_log("maxnotional must be > 0")
+                return
+            self.state.max_position_notional_usd = value
+            self._render_settings()
+            return
+
+        if cmd == "/slippage" and args:
+            try:
+                value = float(args[0])
+            except ValueError:
+                self._write_log("slippage must be a number (bps)")
+                return
+            if value < 0:
+                self._write_log("slippage must be >= 0")
+                return
+            self.state.slippage_bps = value
+            self._render_settings()
+            return
+
+        if cmd == "/short" and args:
+            value = _parse_bool_arg(args[0])
+            if value is None:
+                self._write_log("short must be true|false")
+                return
+            self.state.allow_short = value
+            self._render_settings()
+            return
+
         if cmd == "/paperclosed" and args:
             value = _parse_bool_arg(args[0])
             if value is None:
@@ -413,6 +620,45 @@ class AtlasTui(App):
                 self._write_log("paperrth must be true|false")
                 return
             self.state.paper_regular_hours_only = value
+            self._render_settings()
+            return
+
+        if cmd == "/paperlookback" and args:
+            try:
+                value = int(args[0])
+            except ValueError:
+                self._write_log("paperlookback must be an integer (bars)")
+                return
+            if value <= 0:
+                self._write_log("paperlookback must be > 0")
+                return
+            self.state.paper_lookback_bars = value
+            self._render_settings()
+            return
+
+        if cmd == "/paperpoll" and args:
+            try:
+                value = int(args[0])
+            except ValueError:
+                self._write_log("paperpoll must be an integer (seconds)")
+                return
+            if value <= 0:
+                self._write_log("paperpoll must be > 0")
+                return
+            self.state.paper_poll_seconds = value
+            self._render_settings()
+            return
+
+        if cmd == "/papermaxnotional" and args:
+            try:
+                value = float(args[0])
+            except ValueError:
+                self._write_log("papermaxnotional must be a number (usd)")
+                return
+            if value <= 0:
+                self._write_log("papermaxnotional must be > 0")
+                return
+            self.state.paper_max_position_notional_usd = value
             self._render_settings()
             return
 
@@ -502,18 +748,32 @@ class AtlasTui(App):
             return
 
         if cmd == "/save":
-            path = Path(args[0]) if args else Path(".atlas_tui.json")
-            path.write_text(json.dumps(self.state.to_dict(), indent=2))
+            path = Path(" ".join(args)) if args else self._config_path
+            self._config_path = path
+            self._autosave_enabled = True
+            self._config_load_failed = False
+            try:
+                path.write_text(json.dumps(self.state.to_dict(), indent=2))
+            except Exception as exc:
+                self._write_log(f"failed to save config ({path}): {exc}")
+                return
             self._write_log(f"saved config: {path}")
             return
 
         if cmd == "/load":
-            path = Path(args[0]) if args else Path(".atlas_tui.json")
+            path = Path(" ".join(args)) if args else self._config_path
+            self._config_path = path
             if not path.exists():
                 self._write_log(f"config not found: {path}")
                 return
-            raw = json.loads(path.read_text())
-            self.state = TuiState.from_dict(raw)
+            try:
+                raw = json.loads(path.read_text())
+                self.state = TuiState.from_dict(raw)
+            except Exception as exc:
+                self._write_log(f"failed to load config ({path}): {exc}")
+                return
+            self._autosave_enabled = True
+            self._config_load_failed = False
             self._render_settings()
             self._write_log(f"loaded config: {path}")
             return
@@ -562,8 +822,10 @@ class AtlasTui(App):
         table.add_row("paper_when_closed", str(self.state.paper_allow_trading_when_closed))
         table.add_row("paper_limit_bps", f"{self.state.paper_limit_offset_bps:.2f}")
         table.add_row("paper_dry_run", str(self.state.paper_dry_run))
+        table.add_row("config", str(self._config_path))
 
         self.query_one("#settings", Static).update(table)
+        self._save_config()
 
     def _render_results(self, summary: Optional[Table]) -> None:
         widget = self.query_one("#results", Static)

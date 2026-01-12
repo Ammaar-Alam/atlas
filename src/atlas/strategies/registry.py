@@ -74,3 +74,7 @@ def build_strategy(
         )
 
     raise ValueError(f"unknown strategy: {name}")
+
+
+def list_strategy_names() -> list[str]:
+    return ["ma_crossover", "nec_x"]
