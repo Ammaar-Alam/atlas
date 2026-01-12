@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
@@ -12,6 +11,7 @@ from typing import Optional
 import pandas as pd
 from rich.console import Group
 from rich.table import Table
+from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.suggester import SuggestFromList
@@ -47,7 +47,9 @@ class TuiState:
     paper_lookback_bars: int = 200
     paper_poll_seconds: int = 60
     paper_max_position_notional_usd: float = 1_000.0
+    paper_regular_hours_only: bool = True
     paper_allow_trading_when_closed: bool = False
+    paper_limit_offset_bps: float = 5.0
     paper_dry_run: bool = False
 
     @classmethod
@@ -75,6 +77,15 @@ def _parse_relative_timeframe(spec: str) -> timedelta:
     if spec.endswith("y"):
         return timedelta(days=365 * int(spec[:-1]))
     raise ValueError("unsupported timeframe spec")
+
+
+def _parse_bool_arg(value: str) -> Optional[bool]:
+    value = value.strip().lower()
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    return None
 
 
 def _infer_bar_minutes(index: pd.DatetimeIndex) -> float:
@@ -135,6 +146,13 @@ class AtlasTui(App):
         "/feed sip",
         "/paperfeed iex",
         "/paperfeed delayed_sip",
+        "/paperclosed true",
+        "/paperclosed false",
+        "/paperrth true",
+        "/paperrth false",
+        "/paperlimitbps 5",
+        "/paperdry true",
+        "/paperdry false",
         "/csv data/sample",
         "/symbol SPY",
         "/symbols SPY,QQQ",
@@ -181,6 +199,38 @@ class AtlasTui(App):
         self._paper_run_dir: Optional[Path] = None
         self._last_run_dir: Optional[Path] = None
         self._last_live_decision_ts: Optional[str] = None
+        self._suggestion_matches: list[str] = []
+        self._suggestion_index: int = 0
+
+    def on_key(self, event: events.Key) -> None:
+        input_box = self.query_one("#input", Input)
+        if not input_box.has_focus:
+            return
+
+        if not self._suggestion_matches:
+            return
+
+        if event.key in {"up", "down"}:
+            delta = -1 if event.key == "up" else 1
+            self._suggestion_index = (self._suggestion_index + delta) % len(
+                self._suggestion_matches
+            )
+            self._render_suggestions()
+            event.prevent_default()
+            event.stop()
+            return
+
+        if event.key == "tab":
+            selected = self._suggestion_matches[self._suggestion_index]
+            input_box.value = selected
+            try:
+                input_box.cursor_position = len(selected)
+            except Exception:
+                pass
+            self._update_suggestions(selected)
+            event.prevent_default()
+            event.stop()
+            return
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -244,13 +294,38 @@ class AtlasTui(App):
     def on_input_changed(self, event: Input.Changed) -> None:
         self._update_suggestions(event.value)
 
-    def _update_suggestions(self, value: str) -> None:
+    def _clear_suggestions(self) -> None:
         suggestions = self.query_one("#suggestions", Static)
+        self._suggestion_matches = []
+        self._suggestion_index = 0
+        suggestions.styles.height = 0
+        suggestions.update("")
+        suggestions.display = False
+
+    def _render_suggestions(self) -> None:
+        suggestions = self.query_one("#suggestions", Static)
+        if not self._suggestion_matches:
+            self._clear_suggestions()
+            return
+
+        matches = self._suggestion_matches[:8]
+        self._suggestion_index = max(
+            0, min(int(self._suggestion_index), len(matches) - 1)
+        )
+
+        lines: list[str] = []
+        for idx, cmd in enumerate(matches):
+            prefix = "> " if idx == self._suggestion_index else "  "
+            lines.append(prefix + cmd)
+
+        suggestions.display = True
+        suggestions.styles.height = len(lines)
+        suggestions.update("\n".join(lines))
+
+    def _update_suggestions(self, value: str) -> None:
         value = value.strip()
         if not value.startswith("/"):
-            suggestions.styles.height = 0
-            suggestions.update("")
-            suggestions.display = False
+            self._clear_suggestions()
             return
         if value == "/":
             matches: list[str] = []
@@ -260,34 +335,16 @@ class AtlasTui(App):
                 if base not in seen:
                     seen.add(base)
                     matches.append(base)
-            if matches:
-                max_lines = 8
-                cols = int(max(1, math.ceil(len(matches) / max_lines)))
-                rows = int(math.ceil(len(matches) / cols))
-                col_width = max(len(cmd) for cmd in matches) + 2
-                lines: list[str] = []
-                for r in range(rows):
-                    parts: list[str] = []
-                    for c in range(cols):
-                        idx = r + c * rows
-                        if idx < len(matches):
-                            parts.append(matches[idx].ljust(col_width))
-                    lines.append("".join(parts).rstrip())
-                suggestions.display = True
-                suggestions.styles.height = rows
-                suggestions.update("\n".join(lines))
-                return
         else:
             matches = [cmd for cmd in self.COMMANDS if cmd.startswith(value)]
         if not matches:
-            suggestions.styles.height = 0
-            suggestions.update("")
-            suggestions.display = False
+            self._clear_suggestions()
             return
-        suggestions.display = True
         matches = matches[:8]
-        suggestions.styles.height = len(matches)
-        suggestions.update("\n".join(matches))
+        if matches != self._suggestion_matches:
+            self._suggestion_index = 0
+        self._suggestion_matches = matches
+        self._render_suggestions()
 
     def _handle_command(self, text: str) -> None:
         parts = text.split()
@@ -299,6 +356,7 @@ class AtlasTui(App):
                 "commands: /backtest, /paper start|stop, /timeframe <7d|6h|1m|1y|clear>, "
                 "/bar <1Min|5Min>, /algorithm <name>, /data <sample|csv|alpaca>, "
                 "/feed <iex|delayed_sip|sip>, /paperfeed <iex|delayed_sip|sip>, /csv <path>, "
+                "/paperclosed <true|false>, /paperrth <true|false>, /paperlimitbps <float>, /paperdry <true|false>, "
                 "/symbol <SPY>, /symbols <SPY,QQQ>, /start <iso>, /end <iso>, /save [path], /load [path]"
             )
             return
@@ -340,6 +398,46 @@ class AtlasTui(App):
             self._render_settings()
             return
 
+        if cmd == "/paperclosed" and args:
+            value = _parse_bool_arg(args[0])
+            if value is None:
+                self._write_log("paperclosed must be true|false")
+                return
+            self.state.paper_allow_trading_when_closed = value
+            self._render_settings()
+            return
+
+        if cmd == "/paperrth" and args:
+            value = _parse_bool_arg(args[0])
+            if value is None:
+                self._write_log("paperrth must be true|false")
+                return
+            self.state.paper_regular_hours_only = value
+            self._render_settings()
+            return
+
+        if cmd == "/paperlimitbps" and args:
+            try:
+                value = float(args[0])
+            except ValueError:
+                self._write_log("paperlimitbps must be a number (bps)")
+                return
+            if value < 0:
+                self._write_log("paperlimitbps must be >= 0")
+                return
+            self.state.paper_limit_offset_bps = value
+            self._render_settings()
+            return
+
+        if cmd == "/paperdry" and args:
+            value = _parse_bool_arg(args[0])
+            if value is None:
+                self._write_log("paperdry must be true|false")
+                return
+            self.state.paper_dry_run = value
+            self._render_settings()
+            return
+
         if cmd == "/csv" and args:
             self.state.csv_path = " ".join(args)
             self._render_settings()
@@ -348,8 +446,20 @@ class AtlasTui(App):
         if cmd == "/timeframe" and args:
             if args[0].lower() == "clear":
                 self.state.timeframe = None
-            else:
-                self.state.timeframe = args[0]
+                self._render_settings()
+                return
+
+            try:
+                delta = _parse_relative_timeframe(args[0])
+            except Exception:
+                self._write_log("unsupported timeframe spec (examples: 7d, 6h, 1m, 1y)")
+                return
+            self.state.timeframe = args[0]
+            if self.state.data_source == "alpaca":
+                end_dt = now_ny()
+                start_dt = end_dt - delta
+                self.state.start = start_dt.isoformat()
+                self.state.end = end_dt.isoformat()
             self._render_settings()
             return
 
@@ -448,6 +558,9 @@ class AtlasTui(App):
             f"{self.state.paper_max_position_notional_usd:.2f}",
         )
         table.add_row("paper_feed", self.state.paper_feed)
+        table.add_row("paper_rth_only", str(self.state.paper_regular_hours_only))
+        table.add_row("paper_when_closed", str(self.state.paper_allow_trading_when_closed))
+        table.add_row("paper_limit_bps", f"{self.state.paper_limit_offset_bps:.2f}")
         table.add_row("paper_dry_run", str(self.state.paper_dry_run))
 
         self.query_one("#settings", Static).update(table)
@@ -504,6 +617,12 @@ class AtlasTui(App):
         summary.add_row("symbols", self.state.symbols)
         summary.add_row("bar_timeframe", self.state.bar_timeframe)
         summary.add_row("paper_feed", self.state.paper_feed)
+        summary.add_row("paper_rth_only", str(self.state.paper_regular_hours_only))
+        summary.add_row(
+            "paper_when_closed",
+            str(self.state.paper_allow_trading_when_closed),
+        )
+        summary.add_row("paper_limit_bps", f"{self.state.paper_limit_offset_bps:.2f}")
         summary.add_row("reason", str(decision.get("reason") or "-"))
         summary.add_row(
             "targets",
@@ -635,8 +754,11 @@ class AtlasTui(App):
 
         alpaca_settings = None
         if self.state.data_source == "alpaca":
-            if self.state.timeframe and not (start_dt and end_dt):
-                delta = _parse_relative_timeframe(self.state.timeframe)
+            if self.state.timeframe:
+                try:
+                    delta = _parse_relative_timeframe(self.state.timeframe)
+                except Exception as exc:
+                    raise ValueError(f"invalid timeframe: {self.state.timeframe}") from exc
                 end_dt = now_ny()
                 start_dt = end_dt - delta
                 self.state.start = start_dt.isoformat()
@@ -704,7 +826,7 @@ class AtlasTui(App):
         )
         final_equity = float(equity_curve["equity"].iloc[-1])
         bar_minutes = _infer_bar_minutes(common_index)
-        days = int(pd.Series(common_index.date).nunique())
+        sessions = int(pd.Series(common_index.date).nunique())
         duration = pd.Timestamp(common_index[-1]) - pd.Timestamp(common_index[0])
         trades = pd.read_csv(run_dir / "trades.csv")
         gross_notional = float(trades["notional"].sum()) if len(trades) else 0.0
@@ -717,7 +839,7 @@ class AtlasTui(App):
         summary.add_row("data", f"{self.state.data_source} ({data_hint})")
         summary.add_row(
             "window",
-            f"{(start_dt.isoformat() if start_dt else common_index[0].isoformat())} -> {(end_dt.isoformat() if end_dt else common_index[-1].isoformat())}  |  bars={len(common_index)}  days={days}  bar={bar_minutes:.2f}m",
+            f"{(start_dt.isoformat() if start_dt else common_index[0].isoformat())} -> {(end_dt.isoformat() if end_dt else common_index[-1].isoformat())}  |  bars={len(common_index)}  sessions={sessions}  bar={bar_minutes:.2f}m",
         )
         summary.add_row("duration", str(duration))
         summary.add_row(
@@ -797,7 +919,9 @@ class AtlasTui(App):
             poll_seconds=self.state.paper_poll_seconds,
             max_position_notional_usd=self.state.paper_max_position_notional_usd,
             allow_short=self.state.allow_short,
+            regular_hours_only=self.state.paper_regular_hours_only,
             allow_trading_when_closed=self.state.paper_allow_trading_when_closed,
+            limit_offset_bps=self.state.paper_limit_offset_bps,
             dry_run=self.state.paper_dry_run,
         )
 

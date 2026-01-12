@@ -7,7 +7,7 @@ from typing import Optional
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
-from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
 
 from atlas.config import AlpacaSettings
 
@@ -61,6 +61,33 @@ def submit_market_order(
     return str(res.id)
 
 
+def submit_limit_order(
+    *,
+    client: TradingClient,
+    symbol: str,
+    qty: float,
+    side: str,
+    limit_price: float,
+    extended_hours: bool,
+) -> str:
+    if qty <= 0:
+        raise ValueError("qty must be > 0")
+    if limit_price <= 0:
+        raise ValueError("limit_price must be > 0")
+
+    req = LimitOrderRequest(
+        symbol=symbol,
+        qty=float(qty),
+        side=OrderSide.BUY if side.upper() == "BUY" else OrderSide.SELL,
+        type=OrderType.LIMIT,
+        time_in_force=TimeInForce.DAY,
+        limit_price=float(limit_price),
+        extended_hours=bool(extended_hours),
+    )
+    res = client.submit_order(req)
+    return str(res.id)
+
+
 def wait_for_fill(
     *,
     client: TradingClient,
@@ -99,4 +126,3 @@ def wait_for_fill(
             )
 
         time.sleep(poll_s)
-

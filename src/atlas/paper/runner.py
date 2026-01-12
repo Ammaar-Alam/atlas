@@ -15,7 +15,12 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
-from atlas.broker.alpaca_broker import assert_market_open, submit_market_order, trading_client, wait_for_fill
+from atlas.broker.alpaca_broker import (
+    submit_limit_order,
+    submit_market_order,
+    trading_client,
+    wait_for_fill,
+)
 from atlas.config import AlpacaSettings
 from atlas.data.alpaca_data import parse_alpaca_feed
 from atlas.data.bars import filter_regular_hours, parse_bar_timeframe
@@ -34,7 +39,9 @@ class PaperConfig:
     poll_seconds: int
     max_position_notional_usd: float
     allow_short: bool
+    regular_hours_only: bool
     allow_trading_when_closed: bool
+    limit_offset_bps: float
     dry_run: bool
 
 
@@ -168,8 +175,42 @@ def run_paper_loop(
                 logger.info("max loops reached, stopping")
                 return
 
-            if not cfg.allow_trading_when_closed:
-                assert_market_open(trade_client)
+            clock = trade_client.get_clock()
+            market_open = bool(clock.is_open)
+            if (not market_open) and (not cfg.allow_trading_when_closed):
+                decision_ts = now_ny()
+                f_decisions_jsonl.write(
+                    json.dumps(
+                        {
+                            "timestamp": decision_ts.isoformat(),
+                            "targets": {},
+                            "reason": f"market closed: next_open={clock.next_open} next_close={clock.next_close}",
+                            "debug": {"market_open": market_open},
+                            "positions": {},
+                            "equity": float(trade_client.get_account().equity),
+                            "cash": float(trade_client.get_account().cash),
+                        }
+                    )
+                    + "\n"
+                )
+                f_decisions_jsonl.flush()
+
+                next_open = getattr(clock, "next_open", None)
+                sleep_s = float(cfg.poll_seconds)
+                if next_open is not None:
+                    try:
+                        sleep_s = max((pd.Timestamp(next_open) - pd.Timestamp(decision_ts)).total_seconds(), sleep_s)
+                    except Exception:
+                        sleep_s = float(cfg.poll_seconds)
+
+                logger.info("market closed, sleeping %.1fs until next open", sleep_s)
+                if stop_event is not None:
+                    if stop_event.wait(sleep_s):
+                        logger.info("stop requested, exiting paper loop")
+                        return
+                else:
+                    time.sleep(sleep_s)
+                continue
 
             now = pd.Timestamp.now(tz=NY_TZ)
             bar_open = now.floor(f"{int(tf.minutes)}min")
@@ -201,10 +242,11 @@ def run_paper_loop(
                 df = bars_df.xs(symbol)
                 df = df[["open", "high", "low", "close", "volume"]].copy()
                 df = df.sort_index()
-                df = filter_regular_hours(df)
+                if cfg.regular_hours_only:
+                    df = filter_regular_hours(df)
                 if len(df) > cfg.lookback_bars:
                     df = df.iloc[-cfg.lookback_bars :]
-            bars_by_symbol[symbol] = df
+                bars_by_symbol[symbol] = df
 
             equity = float(trade_client.get_account().equity)
             cash_balance = float(trade_client.get_account().cash)
@@ -328,9 +370,22 @@ def run_paper_loop(
                 if cfg.dry_run:
                     order_id = "dry_run"
                 else:
-                    order_id = submit_market_order(
-                        client=trade_client, symbol=symbol, qty=qty, side=side
-                    )
+                    if market_open:
+                        order_id = submit_market_order(
+                            client=trade_client, symbol=symbol, qty=qty, side=side
+                        )
+                    else:
+                        last_price = float(bars_by_symbol[symbol]["close"].iloc[-1])
+                        offset = float(cfg.limit_offset_bps) / 10_000.0
+                        px = last_price * (1.0 + offset) if side.upper() == "BUY" else last_price * (1.0 - offset)
+                        order_id = submit_limit_order(
+                            client=trade_client,
+                            symbol=symbol,
+                            qty=qty,
+                            side=side,
+                            limit_price=round(float(px), 2),
+                            extended_hours=True,
+                        )
 
                 order_row = {
                     "timestamp": ts,

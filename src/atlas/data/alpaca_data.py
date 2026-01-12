@@ -162,9 +162,10 @@ def load_stock_bars_cached(
     if path.exists():
         logger.info("using cached bars: %s", path)
         df = pd.read_csv(path)
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="raise")
-        df["timestamp"] = df["timestamp"].dt.tz_convert(NY_TZ)
-        df = df.set_index("timestamp").sort_index()
+        ts = pd.to_datetime(df["timestamp"], errors="raise", utc=True).dt.tz_convert(NY_TZ)
+        df = df.drop(columns=["timestamp"])
+        df.index = ts
+        df = df.sort_index()
         return df[["open", "high", "low", "close", "volume"]].copy()
 
     download_stock_bars_to_csv(
@@ -177,7 +178,8 @@ def load_stock_bars_cached(
         feed=feed,
     )
     df = pd.read_csv(path)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="raise")
-    df["timestamp"] = df["timestamp"].dt.tz_convert(NY_TZ)
-    df = df.set_index("timestamp").sort_index()
+    ts = pd.to_datetime(df["timestamp"], errors="raise", utc=True).dt.tz_convert(NY_TZ)
+    df = df.drop(columns=["timestamp"])
+    df.index = ts
+    df = df.sort_index()
     return df[["open", "high", "low", "close", "volume"]].copy()

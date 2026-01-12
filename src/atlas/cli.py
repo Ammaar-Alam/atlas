@@ -69,7 +69,7 @@ def _print_backtest_summary(
     end_ts = pd.Timestamp(bar_index[-1])
     duration = end_ts - start_ts
     bar_minutes = _infer_bar_minutes(bar_index)
-    days = int(pd.Series(bar_index.date).nunique())
+    sessions = int(pd.Series(bar_index.date).nunique())
 
     try:
         _ = Table
@@ -78,7 +78,9 @@ def _print_backtest_summary(
         typer.echo(f"symbols: {','.join(symbols)}")
         typer.echo(f"data: {data_source} ({data_hint})")
         typer.echo(f"window: {start_ts.isoformat()} -> {end_ts.isoformat()}")
-        typer.echo(f"bars: {len(bar_index)} days: {days} bar: {bar_minutes:.2f}m duration: {duration}")
+        typer.echo(
+            f"bars: {len(bar_index)} sessions: {sessions} bar: {bar_minutes:.2f}m duration: {duration}"
+        )
         typer.echo(f"strategy: {strategy_name} ({strategy_params_hint}) warmup_bars={warmup_bars}")
         typer.echo(
             "config: "
@@ -109,7 +111,7 @@ def _print_backtest_summary(
     table.add_row("data", f"{data_source} ({data_hint})")
     table.add_row(
         "window",
-        f"{start_ts.isoformat()} → {end_ts.isoformat()}  |  bars={len(bar_index)}  days={days}  bar={bar_minutes:.2f}m",
+        f"{start_ts.isoformat()} → {end_ts.isoformat()}  |  bars={len(bar_index)}  sessions={sessions}  bar={bar_minutes:.2f}m",
     )
     table.add_row("duration", str(duration))
     table.add_row("strategy", f"{strategy_name} ({strategy_params_hint})")
@@ -325,8 +327,15 @@ def paper(
         None, help="Max notional per symbol"
     ),
     allow_short: bool = typer.Option(False, help="Allow negative target exposure (shorting)"),
+    regular_hours_only: bool = typer.Option(
+        True, help="Filter bars to regular market hours (09:30–16:00 ET)"
+    ),
     allow_trading_when_closed: bool = typer.Option(
-        False, help="Skip market-open check"
+        False, help="Allow trading when market is closed (uses limit orders w/ extended hours)"
+    ),
+    limit_offset_bps: float = typer.Option(
+        5.0,
+        help="When market is closed, price limit orders at ±offset bps from last price to improve fill odds.",
     ),
     dry_run: bool = typer.Option(False, help="Do not submit orders"),
     max_loops: Optional[int] = typer.Option(None, help="Stop after N loops"),
@@ -354,7 +363,9 @@ def paper(
         poll_seconds=poll_seconds,
         max_position_notional_usd=float(max_position_notional_usd),
         allow_short=allow_short,
+        regular_hours_only=regular_hours_only,
         allow_trading_when_closed=allow_trading_when_closed,
+        limit_offset_bps=float(limit_offset_bps),
         dry_run=dry_run,
     )
 
