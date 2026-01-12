@@ -2,15 +2,29 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 
 
 @dataclass(frozen=True)
+class StrategyState:
+    timestamp: pd.Timestamp
+    allow_short: bool
+    cash: float
+    positions: dict[str, float]
+    equity: float
+    day_start_equity: float
+    day_pnl: float
+    day_return: float
+    holding_bars: dict[str, int]
+
+
+@dataclass(frozen=True)
 class StrategyDecision:
-    target_exposure: float
+    target_exposures: dict[str, float]
     reason: Optional[str] = None
+    debug: Optional[dict[str, Any]] = None
 
 
 class Strategy(ABC):
@@ -21,6 +35,7 @@ class Strategy(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def target_exposure(self, bars: pd.DataFrame) -> StrategyDecision:
+    def target_exposures(
+        self, bars_by_symbol: dict[str, pd.DataFrame], state: StrategyState
+    ) -> StrategyDecision:
         raise NotImplementedError
-
