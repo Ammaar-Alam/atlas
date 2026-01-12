@@ -1,0 +1,16 @@
+{
+  "strategy_name": "",
+  "research_notes": "",
+  "parameters": {},
+  "data_requirements": {
+    "universe": [],
+    "bar_timeframe": "1Min",
+    "lookback_bars": 0
+  },
+  "execution": {
+    "order_type": "market",
+    "time_in_force": "day",
+    "max_position_notional_usd": 0
+  }
+}
+
