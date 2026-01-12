@@ -12,6 +12,7 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from atlas.config import AlpacaSettings
+from atlas.data.bars import parse_bar_timeframe
 from atlas.utils.time import NY_TZ
 
 logger = logging.getLogger(__name__)
@@ -57,15 +58,14 @@ def download_stock_bars_to_csv(
     timeframe: str,
     out_path: Optional[Path],
 ) -> Path:
-    if timeframe != "1Min":
-        raise ValueError("only 1Min timeframe is supported in this scaffold")
+    tf = parse_bar_timeframe(timeframe)
 
     client = StockHistoricalDataClient(
         settings.api_key, settings.secret_key, url_override=settings.data_url_override
     )
     req = StockBarsRequest(
         symbol_or_symbols=[symbol],
-        timeframe=TimeFrame(amount=1, unit=TimeFrameUnit.Minute),
+        timeframe=TimeFrame(amount=tf.minutes, unit=TimeFrameUnit.Minute),
         start=start,
         end=end,
     )
@@ -93,6 +93,7 @@ def load_stock_bars_cached(
     end: datetime,
     timeframe: str,
 ) -> pd.DataFrame:
+    _ = parse_bar_timeframe(timeframe)
     path = _bars_cache_path(Path.cwd(), AlpacaBarsDownload(symbol, start, end, timeframe))
     if path.exists():
         logger.info("using cached bars: %s", path)
@@ -115,4 +116,3 @@ def load_stock_bars_cached(
     df["timestamp"] = df["timestamp"].dt.tz_convert(NY_TZ)
     df = df.set_index("timestamp").sort_index()
     return df[["open", "high", "low", "close", "volume"]].copy()
-

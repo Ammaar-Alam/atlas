@@ -17,8 +17,8 @@ from textual.widgets import Header, Input, Log, Static
 
 from atlas.backtest.engine import BacktestConfig, run_backtest
 from atlas.config import get_alpaca_settings, get_default_max_position_notional_usd
-from atlas.data.alpaca_data import load_stock_bars_cached
-from atlas.data.csv_loader import load_bars_csv
+from atlas.data.bars import parse_bar_timeframe
+from atlas.data.universe import load_universe_bars
 from atlas.paper.runner import PaperConfig, run_paper_loop
 from atlas.strategies.registry import build_strategy
 from atlas.utils.time import now_ny, parse_iso_datetime
@@ -26,12 +26,13 @@ from atlas.utils.time import now_ny, parse_iso_datetime
 
 @dataclass
 class TuiState:
-    symbol: str = "SPY"
+    symbols: str = "SPY"
     data_source: str = "sample"
     csv_path: Optional[str] = None
     start: Optional[str] = None
     end: Optional[str] = None
     timeframe: Optional[str] = None
+    bar_timeframe: str = "1Min"
     strategy: str = "ma_crossover"
     fast_window: int = 10
     slow_window: int = 30
@@ -118,12 +119,16 @@ class AtlasTui(App):
         "/timeframe 1m",
         "/timeframe 1y",
         "/timeframe clear",
+        "/bar 1Min",
+        "/bar 5Min",
         "/algorithm ma_crossover",
+        "/algorithm nec_x",
         "/data sample",
         "/data csv",
         "/data alpaca",
-        "/csv /path/to/bars.csv",
+        "/csv data/sample",
         "/symbol SPY",
+        "/symbols SPY,QQQ",
         "/start 2024-01-02T09:30:00-05:00",
         "/end 2024-01-02T16:00:00-05:00",
         "/save",
@@ -134,11 +139,12 @@ class AtlasTui(App):
     #body { height: 1fr; }
     #settings { width: 38%; border: solid $accent; padding: 1; }
     #results { width: 62%; border: solid $accent; padding: 1; }
-    #lower { height: 11; border: solid $accent; padding: 1; }
+    #lower { height: 13; border: solid $accent; padding: 1; }
     #log { height: 1fr; background: $surface; }
     #suggestions {
-        height: auto;
-        max-height: 4;
+        dock: bottom;
+        height: 0;
+        max-height: 8;
         border: none;
         padding: 0 1;
         color: $text-muted;
@@ -146,7 +152,7 @@ class AtlasTui(App):
         background: $surface;
         overflow-y: auto;
     }
-    #input { height: 3; border: solid $accent; padding: 0 1; }
+    #input { dock: bottom; height: 3; border: solid $accent; padding: 0 1; }
     Input > .input--suggestion { color: $text-muted; text-style: dim; }
     """
 
@@ -197,18 +203,20 @@ class AtlasTui(App):
         self._render_settings()
         self._render_results(None)
 
-    def on_key(self, event) -> None:
-        if event.key == "ctrl+c":
-            event.stop()
-            input_box = self.query_one("#input", Input)
-            if input_box.value:
-                input_box.value = ""
-                return
-            now = time.monotonic()
-            if self._ctrl_c_armed_at and now - self._ctrl_c_armed_at < 2.0:
-                self.exit()
-                return
-            self._ctrl_c_armed_at = now
+    def action_help_quit(self) -> None:
+        input_box = self.query_one("#input", Input)
+        if input_box.value:
+            input_box.value = ""
+            self._update_suggestions("")
+            self._ctrl_c_armed_at = None
+            return
+
+        now = time.monotonic()
+        if self._ctrl_c_armed_at and now - self._ctrl_c_armed_at < 2.0:
+            self.exit()
+            return
+        self._ctrl_c_armed_at = now
+        self._write_log("press ctrl+c again to quit")
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
@@ -228,17 +236,29 @@ class AtlasTui(App):
         suggestions = self.query_one("#suggestions", Static)
         value = value.strip()
         if not value.startswith("/"):
+            suggestions.styles.height = 0
+            suggestions.update("")
             suggestions.display = False
             return
         if value == "/":
-            matches = list(self.COMMANDS)
+            matches: list[str] = []
+            seen: set[str] = set()
+            for cmd in self.COMMANDS:
+                base = cmd.split()[0]
+                if base not in seen:
+                    seen.add(base)
+                    matches.append(base)
         else:
             matches = [cmd for cmd in self.COMMANDS if cmd.startswith(value)]
         if not matches:
+            suggestions.styles.height = 0
+            suggestions.update("")
             suggestions.display = False
             return
         suggestions.display = True
-        suggestions.update("\n".join(matches[:6]))
+        matches = matches[:8]
+        suggestions.styles.height = len(matches)
+        suggestions.update("\n".join(matches))
 
     def _handle_command(self, text: str) -> None:
         parts = text.split()
@@ -248,13 +268,18 @@ class AtlasTui(App):
         if cmd in {"/help", "/?"}:
             self._write_log(
                 "commands: /backtest, /paper start|stop, /timeframe <7d|6h|1m|1y|clear>, "
-                "/algorithm <name>, /data <sample|csv|alpaca>, /csv <path>, "
-                "/symbol <SPY>, /start <iso>, /end <iso>, /save [path], /load [path]"
+                "/bar <1Min|5Min>, /algorithm <name>, /data <sample|csv|alpaca>, /csv <path>, "
+                "/symbol <SPY>, /symbols <SPY,QQQ>, /start <iso>, /end <iso>, /save [path], /load [path]"
             )
             return
 
         if cmd == "/symbol" and args:
-            self.state.symbol = args[0].upper()
+            self.state.symbols = args[0].upper()
+            self._render_settings()
+            return
+
+        if cmd == "/symbols" and args:
+            self.state.symbols = args[0].upper()
             self._render_settings()
             return
 
@@ -280,6 +305,11 @@ class AtlasTui(App):
             self._render_settings()
             return
 
+        if cmd in {"/bar", "/bars"} and args:
+            self.state.bar_timeframe = args[0]
+            self._render_settings()
+            return
+
         if cmd == "/start" and args:
             self.state.start = " ".join(args)
             self._render_settings()
@@ -290,8 +320,12 @@ class AtlasTui(App):
             self._render_settings()
             return
 
-        if cmd in {"/algorithm", "/strategy", "/aglorithm"} and args:
+        if cmd in {"/algorithm", "/strategy", "/aglorithm", "/algorithim"} and args:
             self.state.strategy = args[0]
+            if self.state.strategy in {"nec_x", "nec-x"}:
+                self.state.symbols = "SPY,QQQ"
+                self.state.bar_timeframe = "5Min"
+                self.state.slippage_bps = 1.25
             self._render_settings()
             return
 
@@ -338,15 +372,20 @@ class AtlasTui(App):
         table = Table(title="Settings", show_header=False)
         table.add_column("k", style="bold")
         table.add_column("v")
-        table.add_row("symbol", self.state.symbol)
+        table.add_row("symbols", self.state.symbols)
         table.add_row("data_source", self.state.data_source)
         table.add_row("csv_path", self.state.csv_path or "-")
         table.add_row("timeframe", self.state.timeframe or "-")
+        table.add_row("bar_timeframe", self.state.bar_timeframe)
         table.add_row("start", self.state.start or "-")
         table.add_row("end", self.state.end or "-")
         table.add_row(
             "strategy",
-            f"{self.state.strategy} (fast={self.state.fast_window} slow={self.state.slow_window})",
+            (
+                f"{self.state.strategy} (fast={self.state.fast_window} slow={self.state.slow_window})"
+                if self.state.strategy == "ma_crossover"
+                else self.state.strategy
+            ),
         )
         table.add_row("initial_cash", f"{self.state.initial_cash:.2f}")
         table.add_row("max_notional", f"{self.state.max_position_notional_usd:.2f}")
@@ -394,71 +433,86 @@ class AtlasTui(App):
         )
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        if self.state.data_source == "sample":
-            path = Path("data") / "sample" / f"{self.state.symbol}_1min_sample.csv"
-            bars = load_bars_csv(path)
-            data_hint = str(path)
-        elif self.state.data_source == "csv":
-            if not self.state.csv_path:
-                raise ValueError("csv path not set")
-            bars = load_bars_csv(Path(self.state.csv_path))
-            data_hint = self.state.csv_path
-        elif self.state.data_source == "alpaca":
-            if self.state.timeframe and not (self.state.start and self.state.end):
+        symbols = [s.strip().upper() for s in self.state.symbols.split(",") if s.strip()]
+        if not symbols:
+            raise ValueError("symbols not set")
+
+        tf = parse_bar_timeframe(self.state.bar_timeframe)
+        start_dt = parse_iso_datetime(self.state.start) if self.state.start else None
+        end_dt = parse_iso_datetime(self.state.end) if self.state.end else None
+
+        alpaca_settings = None
+        if self.state.data_source == "alpaca":
+            if self.state.timeframe and not (start_dt and end_dt):
                 delta = _parse_relative_timeframe(self.state.timeframe)
                 end_dt = now_ny()
                 start_dt = end_dt - delta
                 self.state.start = start_dt.isoformat()
                 self.state.end = end_dt.isoformat()
-            if not self.state.start or not self.state.end:
+            if not (start_dt and end_dt):
                 raise ValueError("start/end required for alpaca data")
-            settings = get_alpaca_settings(require_keys=True)
-            bars = load_stock_bars_cached(
-                settings=settings,
-                symbol=self.state.symbol,
-                start=parse_iso_datetime(self.state.start),
-                end=parse_iso_datetime(self.state.end),
-                timeframe="1Min",
-            )
-            data_hint = f"{self.state.start} -> {self.state.end}"
-        else:
-            raise ValueError("invalid data source")
+            alpaca_settings = get_alpaca_settings(require_keys=True)
 
-        bars, start_dt, end_dt = _resolve_time_window(
-            bars=bars,
-            timeframe=self.state.timeframe,
-            start=self.state.start,
-            end=self.state.end,
+        csv_path = Path(self.state.csv_path) if self.state.csv_path else None
+        csv_dir = csv_path if (csv_path and csv_path.is_dir()) else None
+        csv_file = csv_path if (csv_path and csv_path.is_file()) else None
+
+        universe = load_universe_bars(
+            symbols=symbols,
+            data_source=self.state.data_source,
+            timeframe=tf,
+            start=start_dt,
+            end=end_dt,
+            csv_path=csv_file,
+            csv_dir=csv_dir,
+            alpaca_settings=alpaca_settings,
         )
+        data_hint = universe.hint
+        bars_by_symbol = universe.bars_by_symbol
 
-        if len(bars) < 3:
-            raise ValueError("backtest window has too few bars")
+        if self.state.timeframe and self.state.data_source != "alpaca":
+            delta = _parse_relative_timeframe(self.state.timeframe)
+            end_dt = min(pd.Timestamp(df.index[-1]).to_pydatetime() for df in bars_by_symbol.values())
+            start_dt = end_dt - delta
+            for s in list(bars_by_symbol):
+                df = bars_by_symbol[s]
+                df = df[(df.index >= start_dt) & (df.index <= end_dt)]
+                bars_by_symbol[s] = df
+
+        common_index: Optional[pd.DatetimeIndex] = None
+        for s in symbols:
+            idx = bars_by_symbol[s].index
+            common_index = idx if common_index is None else common_index.intersection(idx)
+        if common_index is None or len(common_index) < 3:
+            raise ValueError("backtest window has too few aligned bars")
+        common_index = common_index.sort_values()
 
         strat = build_strategy(
             name=self.state.strategy,
             params_path=None,
+            symbols=symbols,
             fast_window=self.state.fast_window,
             slow_window=self.state.slow_window,
         )
 
         cfg = BacktestConfig(
-            symbol=self.state.symbol,
+            symbols=symbols,
             initial_cash=self.state.initial_cash,
             max_position_notional_usd=self.state.max_position_notional_usd,
             slippage_bps=self.state.slippage_bps,
             allow_short=self.state.allow_short,
         )
 
-        run_backtest(bars=bars, strategy=strat, cfg=cfg, run_dir=run_dir)
+        run_backtest(bars_by_symbol=bars_by_symbol, strategy=strat, cfg=cfg, run_dir=run_dir)
 
         metrics = json.loads((run_dir / "metrics.json").read_text())
         equity_curve = pd.read_csv(
             run_dir / "equity_curve.csv", parse_dates=["timestamp"]
         )
         final_equity = float(equity_curve["equity"].iloc[-1])
-        bar_minutes = _infer_bar_minutes(bars.index)
-        days = int(pd.Series(bars.index.date).nunique())
-        duration = pd.Timestamp(bars.index[-1]) - pd.Timestamp(bars.index[0])
+        bar_minutes = _infer_bar_minutes(common_index)
+        days = int(pd.Series(common_index.date).nunique())
+        duration = pd.Timestamp(common_index[-1]) - pd.Timestamp(common_index[0])
         trades = pd.read_csv(run_dir / "trades.csv")
         gross_notional = float(trades["notional"].sum()) if len(trades) else 0.0
 
@@ -466,16 +520,20 @@ class AtlasTui(App):
         summary.add_column("k", style="bold")
         summary.add_column("v")
         summary.add_row("run_dir", str(run_dir))
-        summary.add_row("symbol", self.state.symbol)
+        summary.add_row("symbols", ",".join(symbols))
         summary.add_row("data", f"{self.state.data_source} ({data_hint})")
         summary.add_row(
             "window",
-            f"{start_dt or bars.index[0].isoformat()} -> {end_dt or bars.index[-1].isoformat()}  |  bars={len(bars)}  days={days}  bar={bar_minutes:.2f}m",
+            f"{(start_dt.isoformat() if start_dt else common_index[0].isoformat())} -> {(end_dt.isoformat() if end_dt else common_index[-1].isoformat())}  |  bars={len(common_index)}  days={days}  bar={bar_minutes:.2f}m",
         )
         summary.add_row("duration", str(duration))
         summary.add_row(
             "strategy",
-            f"{self.state.strategy} (fast={self.state.fast_window} slow={self.state.slow_window})",
+            (
+                f"{self.state.strategy} (fast={self.state.fast_window} slow={self.state.slow_window})"
+                if self.state.strategy == "ma_crossover"
+                else self.state.strategy
+            ),
         )
         summary.add_row("warmup_bars", str(strat.warmup_bars()))
         summary.add_row(
@@ -520,14 +578,17 @@ class AtlasTui(App):
         strat = build_strategy(
             name=self.state.strategy,
             params_path=None,
+            symbols=[s.strip().upper() for s in self.state.symbols.split(",") if s.strip()],
             fast_window=self.state.fast_window,
             slow_window=self.state.slow_window,
         )
         cfg = PaperConfig(
-            symbols=[self.state.symbol],
+            symbols=[s.strip().upper() for s in self.state.symbols.split(",") if s.strip()],
+            bar_timeframe=self.state.bar_timeframe,
             lookback_bars=self.state.paper_lookback_bars,
             poll_seconds=self.state.paper_poll_seconds,
             max_position_notional_usd=self.state.paper_max_position_notional_usd,
+            allow_short=self.state.allow_short,
             allow_trading_when_closed=self.state.paper_allow_trading_when_closed,
             dry_run=self.state.paper_dry_run,
         )

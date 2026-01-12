@@ -18,8 +18,9 @@ from atlas.config import (
     get_default_max_position_notional_usd,
     get_log_level,
 )
-from atlas.data.alpaca_data import download_stock_bars_to_csv, load_stock_bars_cached
-from atlas.data.csv_loader import load_bars_csv
+from atlas.data.alpaca_data import download_stock_bars_to_csv
+from atlas.data.bars import parse_bar_timeframe
+from atlas.data.universe import load_universe_bars
 from atlas.logging_utils import setup_logging
 from atlas.paper.runner import PaperConfig, run_paper_loop
 from atlas.strategies.registry import build_strategy
@@ -41,10 +42,10 @@ def _infer_bar_minutes(index: pd.DatetimeIndex) -> float:
 def _print_backtest_summary(
     *,
     run_dir: Path,
-    symbol: str,
+    symbols: list[str],
     data_source: str,
     data_hint: str,
-    bars: pd.DataFrame,
+    bar_index: pd.DatetimeIndex,
     strategy_name: str,
     strategy_params_hint: str,
     warmup_bars: int,
@@ -64,20 +65,20 @@ def _print_backtest_summary(
         else 0.0
     )
 
-    start_ts = pd.Timestamp(bars.index[0])
-    end_ts = pd.Timestamp(bars.index[-1])
+    start_ts = pd.Timestamp(bar_index[0])
+    end_ts = pd.Timestamp(bar_index[-1])
     duration = end_ts - start_ts
-    bar_minutes = _infer_bar_minutes(bars.index)
-    days = int(pd.Series(bars.index.date).nunique())
+    bar_minutes = _infer_bar_minutes(bar_index)
+    days = int(pd.Series(bar_index.date).nunique())
 
     try:
         _ = Table
     except Exception:
         typer.echo(f"run_dir: {run_dir}")
-        typer.echo(f"symbol: {symbol}")
+        typer.echo(f"symbols: {','.join(symbols)}")
         typer.echo(f"data: {data_source} ({data_hint})")
         typer.echo(f"window: {start_ts.isoformat()} -> {end_ts.isoformat()}")
-        typer.echo(f"bars: {len(bars)} days: {days} bar: {bar_minutes:.2f}m duration: {duration}")
+        typer.echo(f"bars: {len(bar_index)} days: {days} bar: {bar_minutes:.2f}m duration: {duration}")
         typer.echo(f"strategy: {strategy_name} ({strategy_params_hint}) warmup_bars={warmup_bars}")
         typer.echo(
             "config: "
@@ -104,11 +105,11 @@ def _print_backtest_summary(
     table.add_column("v")
 
     table.add_row("run_dir", str(run_dir))
-    table.add_row("symbol", symbol)
+    table.add_row("symbols", ",".join(symbols))
     table.add_row("data", f"{data_source} ({data_hint})")
     table.add_row(
         "window",
-        f"{start_ts.isoformat()} → {end_ts.isoformat()}  |  bars={len(bars)}  days={days}  bar={bar_minutes:.2f}m",
+        f"{start_ts.isoformat()} → {end_ts.isoformat()}  |  bars={len(bar_index)}  days={days}  bar={bar_minutes:.2f}m",
     )
     table.add_row("duration", str(duration))
     table.add_row("strategy", f"{strategy_name} ({strategy_params_hint})")
@@ -156,7 +157,7 @@ def download_bars(
     symbol: str = typer.Option(..., help="US equity symbol, e.g. SPY"),
     start: str = typer.Option(..., help="ISO datetime, e.g. 2024-01-02T09:30:00-05:00"),
     end: str = typer.Option(..., help="ISO datetime, e.g. 2024-01-02T16:00:00-05:00"),
-    timeframe: str = typer.Option("1Min", help="Only 1Min supported in this scaffold"),
+    timeframe: str = typer.Option("1Min", help="Bar timeframe, e.g. 1Min or 5Min"),
     out: Optional[Path] = typer.Option(None, help="Optional explicit output CSV path"),
 ) -> None:
     settings = get_alpaca_settings(require_keys=True)
@@ -176,10 +177,17 @@ def download_bars(
 @app.command()
 def backtest(
     symbol: str = typer.Option("SPY", help="Symbol to backtest"),
+    symbols: Optional[str] = typer.Option(
+        None, help="Comma-separated symbols, e.g. SPY,QQQ (overrides --symbol)"
+    ),
     data_source: str = typer.Option(
         "sample", help="sample|csv|alpaca", show_default=True
     ),
     csv_path: Optional[Path] = typer.Option(None, help="CSV path when data-source=csv"),
+    csv_dir: Optional[Path] = typer.Option(
+        None, help="CSV directory with per-symbol files when data-source=csv and multiple symbols"
+    ),
+    bar_timeframe: str = typer.Option("1Min", help="Bar timeframe, e.g. 1Min or 5Min"),
     start: Optional[str] = typer.Option(
         None, help="ISO datetime (required for alpaca; optional filter otherwise)"
     ),
@@ -196,7 +204,10 @@ def backtest(
     max_position_notional_usd: Optional[float] = typer.Option(
         None, help="Max notional per symbol"
     ),
-    slippage_bps: float = typer.Option(0.0, help="Fill slippage in basis points"),
+    slippage_bps: Optional[float] = typer.Option(
+        None,
+        help="Fill cost per side in basis points (slippage/spread proxy). If omitted, nec_x defaults to 1.25 bps/side.",
+    ),
     allow_short: bool = typer.Option(False, help="Allow negative exposure"),
 ) -> None:
     run_dir = Path("outputs") / "backtests" / _run_id("backtest")
@@ -205,72 +216,77 @@ def backtest(
     if max_position_notional_usd is None:
         max_position_notional_usd = get_default_max_position_notional_usd(mode="backtest")
 
+    tf = parse_bar_timeframe(bar_timeframe)
     start_dt = parse_iso_datetime(start) if start is not None else None
     end_dt = parse_iso_datetime(end) if end is not None else None
 
-    if data_source == "sample":
-        sample_path = Path("data") / "sample" / f"{symbol}_1min_sample.csv"
-        if not sample_path.exists():
-            raise typer.BadParameter(f"missing sample data for {symbol}: {sample_path}")
-        bars = load_bars_csv(sample_path)
-        data_hint = str(sample_path)
-    elif data_source == "csv":
-        if csv_path is None:
-            raise typer.BadParameter("csv-path is required when data-source=csv")
-        bars = load_bars_csv(csv_path)
-        data_hint = str(csv_path)
-    elif data_source == "alpaca":
-        if start is None or end is None:
-            raise typer.BadParameter("start and end are required when data-source=alpaca")
-        settings = get_alpaca_settings(require_keys=True)
-        bars = load_stock_bars_cached(
-            settings=settings,
-            symbol=symbol,
+    universe_symbols = (
+        [s.strip().upper() for s in (symbols or "").split(",") if s.strip()]
+        if symbols is not None
+        else [symbol.strip().upper()]
+    )
+
+    alpaca_settings = get_alpaca_settings(require_keys=True) if data_source == "alpaca" else None
+    try:
+        universe = load_universe_bars(
+            symbols=universe_symbols,
+            data_source=data_source,
+            timeframe=tf,
             start=start_dt,
             end=end_dt,
-            timeframe="1Min",
+            csv_path=csv_path,
+            csv_dir=csv_dir,
+            alpaca_settings=alpaca_settings,
         )
-        data_hint = f"{start_dt.isoformat()} -> {end_dt.isoformat()}"
-    else:
-        raise typer.BadParameter("data-source must be one of: sample, csv, alpaca")
-
-    if start_dt is not None:
-        bars = bars[bars.index >= start_dt]
-    if end_dt is not None:
-        bars = bars[bars.index <= end_dt]
-    if len(bars) < 3:
-        raise typer.BadParameter("backtest window has too few bars after filtering")
+    except FileNotFoundError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
     strat = build_strategy(
         name=strategy,
         params_path=strategy_params,
+        symbols=universe_symbols,
         fast_window=fast_window,
         slow_window=slow_window,
     )
 
     cfg = BacktestConfig(
-        symbol=symbol,
+        symbols=universe_symbols,
         initial_cash=initial_cash,
         max_position_notional_usd=float(max_position_notional_usd),
-        slippage_bps=slippage_bps,
+        slippage_bps=float(
+            (1.25 if strategy in {"nec_x", "nec-x"} else 0.0)
+            if slippage_bps is None
+            else slippage_bps
+        ),
         allow_short=allow_short,
     )
 
+    common_index: Optional[pd.DatetimeIndex] = None
+    for sym in universe_symbols:
+        idx = universe.bars_by_symbol[sym].index
+        common_index = idx if common_index is None else common_index.intersection(idx)
+    if common_index is None or len(common_index) < 3:
+        raise typer.BadParameter("backtest window has too few aligned bars")
+    common_index = common_index.sort_values()
+
     t0 = time.perf_counter()
-    run_backtest(bars=bars, strategy=strat, cfg=cfg, run_dir=run_dir)
+    run_backtest(bars_by_symbol=universe.bars_by_symbol, strategy=strat, cfg=cfg, run_dir=run_dir)
     elapsed_s = time.perf_counter() - t0
 
-    strategy_params_hint = (
-        f"params={strategy_params}"
-        if strategy_params is not None
-        else f"fast={fast_window} slow={slow_window}"
-    )
+    if strategy_params is not None:
+        strategy_params_hint = f"params={strategy_params}"
+    elif strategy == "ma_crossover":
+        strategy_params_hint = f"fast={fast_window} slow={slow_window}"
+    else:
+        strategy_params_hint = "defaults"
     _print_backtest_summary(
         run_dir=run_dir,
-        symbol=symbol,
+        symbols=universe_symbols,
         data_source=data_source,
-        data_hint=data_hint,
-        bars=bars,
+        data_hint=universe.hint,
+        bar_index=common_index,
         strategy_name=strategy,
         strategy_params_hint=strategy_params_hint,
         warmup_bars=strat.warmup_bars(),
@@ -282,6 +298,7 @@ def backtest(
 @app.command()
 def paper(
     symbols: list[str] = typer.Option(["SPY"], help="Symbols to trade, repeatable"),
+    bar_timeframe: str = typer.Option("1Min", help="Bar timeframe, e.g. 1Min or 5Min"),
     strategy: str = typer.Option("ma_crossover", help="Strategy name"),
     strategy_params: Optional[Path] = typer.Option(
         None, help="JSON file with strategy parameters"
@@ -293,6 +310,7 @@ def paper(
     max_position_notional_usd: Optional[float] = typer.Option(
         None, help="Max notional per symbol"
     ),
+    allow_short: bool = typer.Option(False, help="Allow negative target exposure (shorting)"),
     allow_trading_when_closed: bool = typer.Option(
         False, help="Skip market-open check"
     ),
@@ -309,15 +327,18 @@ def paper(
     strat = build_strategy(
         name=strategy,
         params_path=strategy_params,
+        symbols=symbols,
         fast_window=fast_window,
         slow_window=slow_window,
     )
 
     cfg = PaperConfig(
         symbols=symbols,
+        bar_timeframe=bar_timeframe,
         lookback_bars=lookback_bars,
         poll_seconds=poll_seconds,
         max_position_notional_usd=float(max_position_notional_usd),
+        allow_short=allow_short,
         allow_trading_when_closed=allow_trading_when_closed,
         dry_run=dry_run,
     )
