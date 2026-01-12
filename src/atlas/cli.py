@@ -160,7 +160,7 @@ def download_bars(
     timeframe: str = typer.Option("1Min", help="Bar timeframe, e.g. 1Min or 5Min"),
     feed: str = typer.Option(
         "delayed_sip",
-        help="Alpaca data feed: iex (live), delayed_sip (free, delayed), sip (paid).",
+        help="Alpaca data feed: iex, sip, delayed_sip (alias: uses sip but clamps end >=15m old).",
     ),
     out: Optional[Path] = typer.Option(None, help="Optional explicit output CSV path"),
 ) -> None:
@@ -201,7 +201,7 @@ def backtest(
     ),
     alpaca_feed: str = typer.Option(
         "delayed_sip",
-        help="When data-source=alpaca: iex (live), delayed_sip (free, delayed), sip (paid).",
+        help="When data-source=alpaca: iex, sip, delayed_sip (alias: uses sip but clamps end >=15m old).",
     ),
     strategy: str = typer.Option("ma_crossover", help="Strategy name"),
     strategy_params: Optional[Path] = typer.Option(
@@ -311,7 +311,7 @@ def paper(
     bar_timeframe: str = typer.Option("1Min", help="Bar timeframe, e.g. 1Min or 5Min"),
     alpaca_feed: str = typer.Option(
         "iex",
-        help="Alpaca data feed for live bars: iex (live), delayed_sip (delayed), sip (paid).",
+        help="Alpaca data feed for bars: iex, sip, delayed_sip (alias: uses sip but clamps end >=15m old).",
     ),
     strategy: str = typer.Option("ma_crossover", help="Strategy name"),
     strategy_params: Optional[Path] = typer.Option(

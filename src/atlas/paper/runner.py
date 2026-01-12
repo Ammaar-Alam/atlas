@@ -12,7 +12,6 @@ from threading import Event
 
 import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.enums import DataFeed
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
@@ -54,8 +53,8 @@ def _fetch_recent_bars(
     feed: str,
 ) -> pd.DataFrame:
     tf = parse_bar_timeframe(timeframe)
-    data_feed: DataFeed = parse_alpaca_feed(feed)
-    end = now_ny()
+    feed_cfg = parse_alpaca_feed(feed)
+    end = now_ny() - timedelta(minutes=feed_cfg.min_end_delay_minutes)
     start = end - timedelta(minutes=max(lookback_bars * tf.minutes * 2, 10))
     req = StockBarsRequest(
         symbol_or_symbols=symbols,
@@ -63,7 +62,7 @@ def _fetch_recent_bars(
         start=start,
         end=end,
         limit=max(lookback_bars, 10),
-        feed=data_feed,
+        feed=feed_cfg.api_feed,
     )
     res = client.get_stock_bars(req).df
     if res.index.tz is None:
