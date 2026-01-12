@@ -135,7 +135,7 @@ class AtlasTui(App):
     #settings { width: 38%; border: solid $accent; padding: 1; }
     #results { width: 62%; border: solid $accent; padding: 1; }
     #lower { height: 11; border: solid $accent; padding: 1; }
-    #log { height: 1fr; }
+    #log { height: 1fr; background: $surface; }
     #suggestions {
         height: auto;
         max-height: 4;
@@ -143,6 +143,7 @@ class AtlasTui(App):
         padding: 0 1;
         color: $text-muted;
         text-style: dim;
+        background: $surface;
         overflow-y: auto;
     }
     #input { height: 3; border: solid $accent; padding: 0 1; }
@@ -189,10 +190,10 @@ class AtlasTui(App):
     def on_mount(self) -> None:
         log_widget = self.query_one("#log", Log)
         log_widget.auto_scroll = True
+        log_widget.display = False
         suggestions = self.query_one("#suggestions", Static)
         suggestions.display = False
         self.query_one("#input", Input).focus()
-        self._write_log("ready — /help")
         self._render_settings()
         self._render_results(None)
 
@@ -202,14 +203,12 @@ class AtlasTui(App):
             input_box = self.query_one("#input", Input)
             if input_box.value:
                 input_box.value = ""
-                self._write_log("input cleared")
                 return
             now = time.monotonic()
             if self._ctrl_c_armed_at and now - self._ctrl_c_armed_at < 2.0:
                 self.exit()
                 return
             self._ctrl_c_armed_at = now
-            self._write_log("press ctrl+c again to quit")
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
@@ -231,7 +230,10 @@ class AtlasTui(App):
         if not value.startswith("/"):
             suggestions.display = False
             return
-        matches = [cmd for cmd in self.COMMANDS if cmd.startswith(value)]
+        if value == "/":
+            matches = list(self.COMMANDS)
+        else:
+            matches = [cmd for cmd in self.COMMANDS if cmd.startswith(value)]
         if not matches:
             suggestions.display = False
             return
@@ -328,6 +330,8 @@ class AtlasTui(App):
 
     def _write_log(self, message: str) -> None:
         log_widget = self.query_one("#log", Log)
+        if not log_widget.display:
+            log_widget.display = True
         log_widget.write_line(message)
 
     def _render_settings(self) -> None:
