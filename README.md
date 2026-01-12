@@ -34,6 +34,8 @@ Uses bundled sample minute bars in `data/sample/`.
 atlas backtest --symbol SPY --data-source sample
 ```
 
+At the end of the run, the CLI prints a short backtest summary (window, bar count, strategy, and core metrics).
+
 Outputs land in `outputs/backtests/{run_id}/`:
 
 - `trades.csv` and `trades.json`
@@ -96,6 +98,7 @@ atlas --help
 atlas backtest --help
 atlas paper --help
 atlas download-bars --help
+atlas tui
 ```
 
 ## Data sources

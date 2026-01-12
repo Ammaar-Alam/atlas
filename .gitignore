@@ -51,6 +51,7 @@ data/alpaca/
 # Python
 __pycache__/
 *.pyc
+*.egg-info/
 
 # Logs/cache
 *.log

@@ -34,4 +34,3 @@ Paper:
 ## Strategy spec placeholder
 
 Use `strategy_spec.json` as a scratchpad for the next model’s spec, parameters, and notes.
-
