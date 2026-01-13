@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import time
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -11,13 +13,17 @@ from typing import Any, Optional
 
 import pandas as pd
 from rich.console import Group
+from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
+from rich import box
+from rich.align import Align
 from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Header, Input, Log, Static
 
-from atlas.backtest.engine import BacktestConfig, run_backtest
+from atlas.backtest.engine import BacktestConfig, BacktestProgress, run_backtest
 from atlas.config import get_alpaca_settings, get_default_max_position_notional_usd
 from atlas.data.bars import parse_bar_timeframe
 from atlas.data.universe import load_universe_bars
@@ -301,21 +307,21 @@ class AtlasTui(App):
     CSS = """
     Screen { layout: vertical; background: $surface; }
     #body { height: 1fr; }
-    #settings { width: 38%; border: solid $accent; padding: 1; }
-    #results { width: 62%; border: solid $accent; padding: 1; }
-    #lower { height: 18; border: solid $accent; padding: 1; }
+    #settings { width: 36%; border: round $accent; padding: 1 2; }
+    #results { width: 64%; border: round $accent; padding: 1 2; }
+    #lower { height: 18; border: round $accent; padding: 1 2; }
     #log { height: 1fr; background: $surface; }
     #suggestions {
         height: 0;
-        max-height: 8;
-        border: none;
+        max-height: 10;
+        border: round $accent;
         padding: 0 1;
         color: $text-muted;
         text-style: dim;
         background: $surface;
         overflow-y: auto;
     }
-    #input { height: 3; border: solid $accent; padding: 0 1; }
+    #input { height: 3; border: round $accent; padding: 0 1; }
     Input > .input--suggestion { color: $text-muted; text-style: dim; }
     """
 
@@ -330,6 +336,15 @@ class AtlasTui(App):
             ),
         )
         self._ctrl_c_armed_at: Optional[float] = None
+        self._backtest_thread: Optional[Thread] = None
+        self._backtest_events: "queue.Queue[tuple[str, object]]" = queue.Queue()
+        self._backtest_status: str = ""
+        self._backtest_progress: Optional[BacktestProgress] = None
+        self._backtest_run_dir: Optional[Path] = None
+        self._backtest_started_at: Optional[float] = None
+        self._backtest_initial_cash: float = float(self.state.initial_cash)
+        self._backtest_max_notional: float = float(self.state.max_position_notional_usd)
+        self._backtest_equity_spark: deque[float] = deque(maxlen=120)
         self._paper_thread: Optional[Thread] = None
         self._paper_stop: Optional[Event] = None
         self._paper_run_dir: Optional[Path] = None
@@ -593,7 +608,7 @@ class AtlasTui(App):
             return
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield Header(show_clock=True)
         with Horizontal(id="body"):
             settings = Static(id="settings")
             settings.border_title = "Settings"
@@ -626,6 +641,7 @@ class AtlasTui(App):
         self._render_settings()
         self._render_results(None)
         self.set_interval(0.5, self._refresh_live_view)
+        self.set_interval(0.2, self._refresh_backtest_view)
 
     def on_unmount(self) -> None:
         self._save_config()
@@ -693,7 +709,7 @@ class AtlasTui(App):
             lines.append(prefix + cmd)
 
         suggestions.display = True
-        suggestions.styles.height = len(lines)
+        suggestions.styles.height = len(lines) + 2
         suggestions.update("\n".join(lines))
 
     def _update_suggestions(self, value: str) -> None:
@@ -1115,9 +1131,14 @@ class AtlasTui(App):
     def _render_settings(self) -> None:
         self.state.strategy = self._canonicalize_strategy_name(self.state.strategy)
         self._ensure_strategy_params(self.state.strategy)
-        table = Table(title="Settings", show_header=False)
-        table.add_column("k", style="bold")
+        table = Table(show_header=False, box=box.SIMPLE, expand=True, pad_edge=False)
+        table.add_column("k", style="bold", no_wrap=True)
         table.add_column("v")
+
+        def _section(label: str) -> None:
+            table.add_row(Text(label, style="bold cyan"), "")
+
+        _section("Data")
         table.add_row("symbols", self.state.symbols)
         table.add_row("data_source", self.state.data_source)
         table.add_row("alpaca_feed", self.state.alpaca_feed)
@@ -1126,6 +1147,8 @@ class AtlasTui(App):
         table.add_row("bar_timeframe", self.state.bar_timeframe)
         table.add_row("start", self.state.start or "-")
         table.add_row("end", self.state.end or "-")
+
+        _section("Strategy")
         table.add_row(
             "strategy",
             (
@@ -1136,26 +1159,32 @@ class AtlasTui(App):
         )
         params = self.state.strategy_params.get(self.state.strategy, {})
         if params:
-            table.add_row(
-                "params",
-                self._format_strategy_params(self.state.strategy, params),
-            )
+            table.add_row("params", self._format_strategy_params(self.state.strategy, params))
+        table.add_row("slippage_bps", f"{self.state.slippage_bps:.2f}")
+        table.add_row(
+            "allow_short",
+            Text("true", style="green") if self.state.allow_short else Text("false", style="red"),
+        )
+
+        _section("Sizing")
         table.add_row("initial_cash", f"{self.state.initial_cash:.2f}")
         table.add_row("max_notional", f"{self.state.max_position_notional_usd:.2f}")
-        table.add_row("slippage_bps", f"{self.state.slippage_bps:.2f}")
-        table.add_row("allow_short", str(self.state.allow_short))
-        table.add_row("paper_running", str(self._paper_thread is not None))
+
+        _section("Paper")
+        table.add_row(
+            "paper_running",
+            Text("true", style="green") if (self._paper_thread is not None) else Text("false", style="red"),
+        )
         table.add_row("paper_lookback", str(self.state.paper_lookback_bars))
         table.add_row("paper_poll_s", str(self.state.paper_poll_seconds))
-        table.add_row(
-            "paper_max_notional",
-            f"{self.state.paper_max_position_notional_usd:.2f}",
-        )
+        table.add_row("paper_max_notional", f"{self.state.paper_max_position_notional_usd:.2f}")
         table.add_row("paper_feed", self.state.paper_feed)
         table.add_row("paper_rth_only", str(self.state.paper_regular_hours_only))
         table.add_row("paper_when_closed", str(self.state.paper_allow_trading_when_closed))
         table.add_row("paper_limit_bps", f"{self.state.paper_limit_offset_bps:.2f}")
         table.add_row("paper_dry_run", str(self.state.paper_dry_run))
+
+        _section("Config")
         table.add_row("config", str(self._config_path))
 
         self.query_one("#settings", Static).update(table)
@@ -1164,12 +1193,13 @@ class AtlasTui(App):
     def _render_results(self, summary: Optional[Table]) -> None:
         widget = self.query_one("#results", Static)
         if summary is None:
-            table = Table(show_header=False)
+            widget.border_title = "Results"
+            table = Table(show_header=False, box=box.SIMPLE)
             table.add_column("k", style="bold")
             table.add_column("v")
             table.add_row("status", "no backtest yet")
             table.add_row("hint", "run /backtest to generate a summary")
-            widget.update(table)
+            widget.update(Panel(table, title="Welcome", border_style="cyan", box=box.ROUNDED))
             return
         widget.update(summary)
 
@@ -1321,16 +1351,429 @@ class AtlasTui(App):
         self._last_live_decision_ts = ts
         self._render_paper_live(decision)
 
-    def _run_backtest(self) -> None:
-        self._write_log("running backtest...")
-        try:
-            run_dir, summary = self._run_backtest_sync()
-        except Exception as exc:
-            self._write_log(f"backtest error: {exc}")
+    def _progress_bar(self, pct: float, *, width: int = 26) -> str:
+        pct = max(0.0, min(float(pct), 1.0))
+        width = max(int(width), 8)
+        filled = int(round(pct * width))
+        filled = max(0, min(filled, width))
+        return "█" * filled + "░" * (width - filled)
+
+    def _sparkline(self, values: list[float], *, width: int = 72) -> str:
+        blocks = "▁▂▃▄▅▆▇█"
+        if not values:
+            return ""
+        if width <= 0:
+            width = 1
+        step = max(1, len(values) // width)
+        sampled = values[::step]
+        if len(sampled) > width:
+            sampled = sampled[-width:]
+        lo = min(sampled)
+        hi = max(sampled)
+        if not (hi > lo):
+            return blocks[0] * len(sampled)
+        span = hi - lo
+        out: list[str] = []
+        for v in sampled:
+            idx = int((float(v) - float(lo)) / float(span) * (len(blocks) - 1))
+            idx = max(0, min(idx, len(blocks) - 1))
+            out.append(blocks[idx])
+        return "".join(out)
+
+    def _render_backtest_live(self) -> None:
+        results = self.query_one("#results", Static)
+        results.border_title = "Backtest (running)"
+
+        status = self._backtest_status or "running…"
+        run_dir = self._backtest_run_dir
+        started_at = self._backtest_started_at or time.monotonic()
+        elapsed_s = max(time.monotonic() - started_at, 0.0)
+
+        progress = self._backtest_progress
+        if progress is None:
+            body = Table(show_header=False, box=box.SIMPLE)
+            body.add_column("k", style="bold")
+            body.add_column("v")
+            body.add_row("status", status)
+            if run_dir is not None:
+                body.add_row("run_dir", str(run_dir))
+            body.add_row("elapsed", f"{elapsed_s:.1f}s")
+            results.update(Panel(body, title="Backtest", border_style="cyan", box=box.ROUNDED))
             return
-        self._last_run_dir = run_dir
-        self._render_results(summary)
-        self._write_log(f"backtest complete: {run_dir}")
+
+        pct = float(progress.i) / float(progress.n) if progress.n > 0 else 0.0
+        bar = self._progress_bar(pct, width=28)
+
+        rate = float(progress.i) / elapsed_s if elapsed_s > 0 else 0.0
+        eta_s = float(progress.n - progress.i) / rate if rate > 0 else 0.0
+        eta_text = "-" if eta_s <= 0 else f"{eta_s/60.0:.1f}m"
+
+        equity = float(progress.equity)
+        total_return = float(progress.total_return)
+        drawdown = float(progress.drawdown)
+        day_pnl = float(progress.day_pnl)
+
+        return_style = "green" if total_return >= 0 else "red"
+        dd_style = "red" if drawdown < 0 else "green"
+        day_style = "green" if day_pnl >= 0 else "red"
+
+        kpis = Table.grid(expand=True)
+        kpis.add_column(ratio=1)
+        kpis.add_column(ratio=1)
+        kpis.add_column(ratio=1)
+        kpis.add_row(
+            Panel(
+                Align.center(Text(f"${equity:,.2f}", style=f"bold {return_style}")),
+                title="Equity",
+                border_style=return_style,
+                box=box.ROUNDED,
+                padding=(1, 2),
+            ),
+            Panel(
+                Align.center(Text(f"{total_return:+.2%}", style=f"bold {return_style}")),
+                title="Total Return",
+                border_style=return_style,
+                box=box.ROUNDED,
+                padding=(1, 2),
+            ),
+            Panel(
+                Align.center(Text(f"{drawdown:.2%}", style=f"bold {dd_style}")),
+                title="Drawdown",
+                border_style=dd_style,
+                box=box.ROUNDED,
+                padding=(1, 2),
+            ),
+        )
+
+        meta = Table(show_header=False, box=box.SIMPLE)
+        meta.add_column("k", style="bold")
+        meta.add_column("v")
+        meta.add_row("status", status)
+        meta.add_row("progress", f"{bar}  {pct*100:5.1f}%  ({progress.i}/{progress.n})")
+        meta.add_row("ts", str(progress.timestamp))
+        meta.add_row("elapsed", f"{elapsed_s:.1f}s  rate={rate:.0f} bars/s  eta≈{eta_text}")
+        if run_dir is not None:
+            meta.add_row("run_dir", str(run_dir))
+        meta.add_row("cash", f"${float(progress.cash):,.2f}")
+        meta.add_row("day_pnl", Text(f"{day_pnl:+,.2f}", style=f"bold {day_style}"))
+        meta.add_row("fills", str(int(progress.fills)))
+        if progress.last_trade:
+            t = progress.last_trade
+            meta.add_row(
+                "last_fill",
+                f"{t.get('symbol')} {t.get('side')} qty={t.get('qty')} px={t.get('fill_price')} reason={t.get('strategy_reason')}",
+            )
+
+        positions = Table(box=box.SIMPLE, show_header=True, header_style="bold")
+        positions.add_column("symbol", style="bold")
+        positions.add_column("qty", justify="right")
+        positions.add_column("last", justify="right")
+        positions.add_column("notional", justify="right")
+        positions.add_column("exposure", justify="right")
+
+        any_pos = False
+        for sym, qty in sorted(progress.positions.items()):
+            qty = float(qty)
+            if abs(qty) <= 1e-8:
+                continue
+            any_pos = True
+            last = float(progress.closes.get(sym, 0.0))
+            notional = qty * last
+            exposure = (
+                notional / float(self._backtest_max_notional)
+                if float(self._backtest_max_notional) > 0
+                else 0.0
+            )
+            s = "green" if qty > 0 else "red"
+            positions.add_row(
+                sym,
+                Text(f"{qty:,.2f}", style=s),
+                f"{last:,.2f}",
+                Text(f"{notional:,.2f}", style=s),
+                Text(f"{exposure:+.2f}x", style=s),
+            )
+        if not any_pos:
+            positions.add_row("-", "0", "-", "0", "0x")
+
+        spark_values = list(self._backtest_equity_spark)
+        spark = self._sparkline(spark_values, width=80)
+        spark_style = "green" if len(spark_values) >= 2 and spark_values[-1] >= spark_values[0] else "red"
+        spark_panel = Panel(
+            Align.center(Text(spark, style=spark_style)),
+            title="Equity (recent)",
+            border_style=spark_style,
+            box=box.ROUNDED,
+            padding=(1, 2),
+        )
+
+        results.update(
+            Group(
+                kpis,
+                "",
+                Panel(meta, title="Progress", border_style="cyan", box=box.ROUNDED),
+                "",
+                Panel(positions, title="Positions", border_style="magenta", box=box.ROUNDED),
+                "",
+                spark_panel,
+            )
+        )
+
+    def _refresh_backtest_view(self) -> None:
+        if self._backtest_thread is None:
+            return
+
+        updated = False
+        while True:
+            try:
+                kind, payload = self._backtest_events.get_nowait()
+            except queue.Empty:
+                break
+
+            if kind == "status":
+                self._backtest_status = str(payload)
+                updated = True
+                continue
+
+            if kind == "progress":
+                progress = payload if isinstance(payload, BacktestProgress) else None
+                if progress is not None:
+                    self._backtest_progress = progress
+                    self._backtest_equity_spark.append(float(progress.equity))
+                    updated = True
+                continue
+
+            if kind == "done":
+                run_dir, summary = payload  # type: ignore[misc]
+                self._backtest_thread = None
+                self._backtest_run_dir = None
+                self._backtest_started_at = None
+                self._backtest_status = ""
+                self._backtest_progress = None
+                self._backtest_equity_spark.clear()
+                self._last_run_dir = run_dir
+                self.query_one("#results", Static).border_title = "Backtest summary"
+                self._render_results(summary)
+                self._write_log(f"backtest complete: {run_dir}")
+                return
+
+            if kind == "error":
+                self._backtest_thread = None
+                self._backtest_run_dir = None
+                self._backtest_started_at = None
+                self._backtest_status = ""
+                self._backtest_progress = None
+                self._backtest_equity_spark.clear()
+                self._write_log(f"backtest error: {payload}")
+                err = Table(show_header=False, box=box.SIMPLE)
+                err.add_column("k", style="bold red")
+                err.add_column("v")
+                err.add_row("status", "backtest failed")
+                err.add_row("error", str(payload))
+                results = self.query_one("#results", Static)
+                results.border_title = "Backtest failed"
+                results.update(
+                    Panel(err, title="Backtest", border_style="red", box=box.ROUNDED)
+                )
+                return
+
+        if updated:
+            self._render_backtest_live()
+
+    def _run_backtest(self) -> None:
+        if self._backtest_thread is not None:
+            if self._backtest_thread.is_alive():
+                self._write_log("backtest already running")
+                return
+            self._backtest_thread = None
+
+        strategy = self._canonicalize_strategy_name(self.state.strategy)
+        self._ensure_strategy_params(strategy)
+
+        run_dir = (
+            Path("outputs")
+            / "backtests"
+            / f"tui_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+
+        self._backtest_run_dir = run_dir
+        self._backtest_started_at = time.monotonic()
+        self._backtest_status = "preparing…"
+        self._backtest_progress = None
+        self._backtest_equity_spark.clear()
+        self._backtest_initial_cash = float(self.state.initial_cash)
+        self._backtest_max_notional = float(self.state.max_position_notional_usd)
+
+        while True:
+            try:
+                _ = self._backtest_events.get_nowait()
+            except queue.Empty:
+                break
+
+        self._render_backtest_live()
+        self._write_log(f"starting backtest: {run_dir}")
+
+        snapshot = self.state.to_dict()
+        snapshot["strategy"] = strategy
+
+        def _worker() -> None:
+            try:
+                run_dir.mkdir(parents=True, exist_ok=True)
+
+                symbols = [s.strip().upper() for s in str(snapshot["symbols"]).split(",") if s.strip()]
+                if not symbols:
+                    raise ValueError("symbols not set")
+
+                tf = parse_bar_timeframe(str(snapshot["bar_timeframe"]))
+                start_dt = parse_iso_datetime(snapshot.get("start")) if snapshot.get("start") else None
+                end_dt = parse_iso_datetime(snapshot.get("end")) if snapshot.get("end") else None
+
+                alpaca_settings = None
+                timeframe = snapshot.get("timeframe")
+                data_source = str(snapshot.get("data_source", "sample"))
+                if data_source == "alpaca":
+                    if timeframe:
+                        try:
+                            delta = _parse_relative_timeframe(str(timeframe))
+                        except Exception as exc:
+                            raise ValueError(f"invalid timeframe: {timeframe}") from exc
+                        end_dt = now_ny()
+                        start_dt = end_dt - delta
+                    if not (start_dt and end_dt):
+                        raise ValueError("start/end required for alpaca data")
+                    self._backtest_events.put(("status", "authenticating alpaca…"))
+                    alpaca_settings = get_alpaca_settings(require_keys=True)
+
+                csv_path = Path(snapshot["csv_path"]) if snapshot.get("csv_path") else None
+                csv_dir = csv_path if (csv_path and csv_path.is_dir()) else None
+                csv_file = csv_path if (csv_path and csv_path.is_file()) else None
+
+                self._backtest_events.put(("status", "loading bars…"))
+                universe = load_universe_bars(
+                    symbols=symbols,
+                    data_source=data_source,
+                    timeframe=tf,
+                    start=start_dt,
+                    end=end_dt,
+                    csv_path=csv_file,
+                    csv_dir=csv_dir,
+                    alpaca_settings=alpaca_settings,
+                    alpaca_feed=str(snapshot.get("alpaca_feed", "delayed_sip")),
+                )
+                data_hint = universe.hint
+                bars_by_symbol = universe.bars_by_symbol
+
+                if timeframe and data_source != "alpaca":
+                    delta = _parse_relative_timeframe(str(timeframe))
+                    end_dt = min(pd.Timestamp(df.index[-1]).to_pydatetime() for df in bars_by_symbol.values())
+                    start_dt = end_dt - delta
+                    for s in list(bars_by_symbol):
+                        df = bars_by_symbol[s]
+                        df = df[(df.index >= start_dt) & (df.index <= end_dt)]
+                        bars_by_symbol[s] = df
+
+                common_index: Optional[pd.DatetimeIndex] = None
+                for s in symbols:
+                    idx = bars_by_symbol[s].index
+                    common_index = idx if common_index is None else common_index.intersection(idx)
+                if common_index is None or len(common_index) < 3:
+                    raise ValueError("backtest window has too few aligned bars")
+                common_index = common_index.sort_values()
+
+                self._backtest_events.put(("status", "building strategy…"))
+                strat = build_strategy(
+                    name=str(snapshot.get("strategy", strategy)),
+                    params_path=None,
+                    symbols=symbols,
+                    fast_window=int(snapshot.get("fast_window", 10)),
+                    slow_window=int(snapshot.get("slow_window", 30)),
+                    params=dict((snapshot.get("strategy_params") or {}).get(strategy, {})),
+                )
+
+                cfg = BacktestConfig(
+                    symbols=symbols,
+                    initial_cash=float(snapshot.get("initial_cash", 100_000.0)),
+                    max_position_notional_usd=float(snapshot.get("max_position_notional_usd", 10_000.0)),
+                    slippage_bps=float(snapshot.get("slippage_bps", 0.0)),
+                    allow_short=bool(snapshot.get("allow_short", False)),
+                )
+
+                self._backtest_events.put(("status", "running backtest…"))
+
+                def _progress(p: BacktestProgress) -> None:
+                    self._backtest_events.put(("progress", p))
+
+                run_backtest(
+                    bars_by_symbol=bars_by_symbol,
+                    strategy=strat,
+                    cfg=cfg,
+                    run_dir=run_dir,
+                    progress=_progress,
+                    progress_interval_s=0.25,
+                )
+
+                self._backtest_events.put(("status", "finalizing…"))
+
+                metrics = json.loads((run_dir / "metrics.json").read_text())
+                final_equity = float(cfg.initial_cash) * (1.0 + float(metrics["total_return"]))
+                bar_minutes = _infer_bar_minutes(common_index)
+                sessions = int(pd.Series(common_index.date).nunique())
+                duration = pd.Timestamp(common_index[-1]) - pd.Timestamp(common_index[0])
+
+                trades_path = run_dir / "trades.csv"
+                trades = pd.read_csv(trades_path) if trades_path.exists() else pd.DataFrame()
+                gross_notional = float(trades["notional"].sum()) if len(trades) and "notional" in trades.columns else 0.0
+
+                summary = Table(title="Backtest summary", show_header=False, box=box.SIMPLE)
+                summary.add_column("k", style="bold")
+                summary.add_column("v")
+                summary.add_row("run_dir", str(run_dir))
+                summary.add_row("symbols", ",".join(symbols))
+                summary.add_row("data", f"{data_source} ({data_hint})")
+                summary.add_row(
+                    "window",
+                    f"{(start_dt.isoformat() if start_dt else common_index[0].isoformat())} -> {(end_dt.isoformat() if end_dt else common_index[-1].isoformat())}  |  bars={len(common_index)}  sessions={sessions}  bar={bar_minutes:.2f}m",
+                )
+                summary.add_row("duration", str(duration))
+                strategy_name = str(snapshot.get("strategy", strategy))
+                if strategy_name in {"ma_crossover", "ema_crossover"}:
+                    summary.add_row(
+                        "strategy",
+                        f"{strategy_name} (fast={int(snapshot.get('fast_window', 10))} slow={int(snapshot.get('slow_window', 30))})",
+                    )
+                else:
+                    summary.add_row("strategy", strategy_name)
+                summary.add_row("warmup_bars", str(strat.warmup_bars()))
+                summary.add_row(
+                    "config",
+                    "  ".join(
+                        [
+                            f"initial_cash={cfg.initial_cash:.2f}",
+                            f"max_notional={cfg.max_position_notional_usd:.2f}",
+                            f"slippage_bps={cfg.slippage_bps:.2f}",
+                            f"allow_short={cfg.allow_short}",
+                        ]
+                    ),
+                )
+                summary.add_row(
+                    "results",
+                    "  ".join(
+                        [
+                            f"final_equity={final_equity:.2f}",
+                            f"total_return={float(metrics['total_return']):.4%}",
+                            f"max_drawdown={float(metrics['max_drawdown']):.4%}",
+                            f"sharpe={float(metrics['sharpe']):.2f}",
+                            f"fills={int(metrics['trades'])}",
+                            f"gross_notional={gross_notional:.2f}",
+                        ]
+                    ),
+                )
+
+                self._backtest_events.put(("done", (run_dir, summary)))
+            except Exception as exc:
+                self._backtest_events.put(("error", str(exc)))
+
+        self._backtest_thread = Thread(target=_worker, daemon=True)
+        self._backtest_thread.start()
 
     def _run_backtest_sync(self) -> tuple[Path, Table]:
         run_dir = (

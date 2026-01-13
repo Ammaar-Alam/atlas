@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 import pandas as pd
 
@@ -33,12 +34,32 @@ class BacktestOutputs:
     decisions_jsonl: Path
 
 
+@dataclass(frozen=True)
+class BacktestProgress:
+    i: int
+    n: int
+    timestamp: str
+    cash: float
+    equity: float
+    day_pnl: float
+    day_return: float
+    total_return: float
+    drawdown: float
+    positions: dict[str, float]
+    targets: dict[str, float]
+    closes: dict[str, float]
+    fills: int
+    last_trade: Optional[dict[str, Any]] = None
+
+
 def run_backtest(
     *,
     bars_by_symbol: dict[str, pd.DataFrame],
     strategy: Strategy,
     cfg: BacktestConfig,
     run_dir: Path,
+    progress: Optional[Callable[[BacktestProgress], None]] = None,
+    progress_interval_s: float = 0.25,
 ) -> BacktestOutputs:
     run_dir.mkdir(parents=True, exist_ok=True)
     decisions_jsonl = run_dir / "decisions.jsonl"
@@ -84,6 +105,8 @@ def run_backtest(
     idx = common_index
     current_day: Optional[object] = None
     day_start_equity = float(cfg.initial_cash)
+    peak_equity = float(cfg.initial_cash)
+    last_progress_t = 0.0
 
     with decisions_jsonl.open("w") as f_decisions:
         for i in range(len(idx)):
@@ -167,6 +190,8 @@ def run_backtest(
             equity = cash + sum(position_qty[s] * closes[s] for s in symbols)
             day_pnl = float(equity - day_start_equity)
             day_return = float(day_pnl / day_start_equity) if day_start_equity > 0 else 0.0
+            peak_equity = max(peak_equity, float(equity))
+            drawdown = float((float(equity) / peak_equity) - 1.0) if peak_equity > 0 else 0.0
 
             for s in symbols:
                 if abs(position_qty[s]) > 1e-8:
@@ -187,6 +212,35 @@ def run_backtest(
                 row[f"{s}_position_qty"] = float(position_qty[s])
                 row[f"{s}_holding_bars"] = int(holding_bars[s])
             equity_rows.append(row)
+
+            if progress is not None:
+                now = time.monotonic()
+                if i == 0 or (now - last_progress_t) >= float(progress_interval_s):
+                    last_progress_t = now
+                    total_return = (
+                        float(equity) / float(cfg.initial_cash) - 1.0
+                        if float(cfg.initial_cash) > 0
+                        else 0.0
+                    )
+                    last_trade = trades_rows[-1] if trades_rows else None
+                    progress(
+                        BacktestProgress(
+                            i=int(i + 1),
+                            n=int(len(idx)),
+                            timestamp=ts.isoformat(),
+                            cash=float(cash),
+                            equity=float(equity),
+                            day_pnl=float(day_pnl),
+                            day_return=float(day_return),
+                            total_return=float(total_return),
+                            drawdown=float(drawdown),
+                            positions={s: float(position_qty[s]) for s in symbols},
+                            targets={s: float(current_targets.get(s, 0.0)) for s in symbols},
+                            closes={s: float(closes[s]) for s in symbols},
+                            fills=int(len(trades_rows)),
+                            last_trade=last_trade,
+                        )
+                    )
 
             if i == len(idx) - 1:
                 break
