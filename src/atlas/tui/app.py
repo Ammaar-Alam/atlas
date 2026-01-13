@@ -1011,7 +1011,24 @@ class AtlasTui(App):
             self.state.strategy = strategy
             self._ensure_strategy_params(strategy)
             if strategy in {"nec_x", "nec_pdt", "orb_trend"}:
-                self.state.symbols = "SPY,QQQ"
+                current_symbols = [
+                    s.strip().upper() for s in self.state.symbols.split(",") if s.strip()
+                ]
+                if strategy in {"nec_x", "nec_pdt"}:
+                    if len(current_symbols) < 2:
+                        self.state.symbols = "SPY,QQQ"
+                        self._write_log(
+                            f"{strategy} is pair-based (2 symbols). Defaulting to SPY,QQQ. "
+                            "Set via /symbols AAPL,TSLA"
+                        )
+                    elif len(current_symbols) > 2:
+                        self.state.symbols = ",".join(current_symbols[:2])
+                        self._write_log(
+                            f"{strategy} is pair-based (2 symbols). Using first two: {self.state.symbols}"
+                        )
+                else:
+                    if not current_symbols or current_symbols == ["SPY"]:
+                        self.state.symbols = "SPY,QQQ"
                 self.state.bar_timeframe = "5Min"
                 params = self.state.strategy_params.get(strategy, {})
                 if strategy == "nec_x":

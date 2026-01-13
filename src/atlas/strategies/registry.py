@@ -75,9 +75,12 @@ def build_strategy(
         return NoTrade()
 
     if name in {"nec_x", "nec-x"}:
-        required = {"SPY", "QQQ"}
-        if not required.issubset({s.upper() for s in symbols}):
-            raise ValueError("nec_x requires --symbols SPY,QQQ")
+        universe_symbols = [s.strip().upper() for s in symbols if s.strip()]
+        if len(universe_symbols) != 2:
+            raise ValueError(
+                f"nec_x requires exactly 2 symbols (got {len(universe_symbols)})"
+            )
+        spy_symbol, qqq_symbol = universe_symbols[0], universe_symbols[1]
 
         def _get_int(key: str, default: int) -> int:
             raw = params.get(key, params.get(key.lower(), default))
@@ -88,6 +91,8 @@ def build_strategy(
             return float(raw)
 
         return NecX(
+            spy=spy_symbol,
+            qqq=qqq_symbol,
             M=_get_int("M", 6),
             V=_get_int("V", 12),
             Wcorr=_get_int("Wcorr", 12),
@@ -104,9 +109,12 @@ def build_strategy(
         )
 
     if name in {"nec_pdt", "nec-pdt"}:
-        required = {"SPY", "QQQ"}
-        if not required.issubset({s.upper() for s in symbols}):
-            raise ValueError("nec_pdt requires --symbols SPY,QQQ")
+        universe_symbols = [s.strip().upper() for s in symbols if s.strip()]
+        if len(universe_symbols) != 2:
+            raise ValueError(
+                f"nec_pdt requires exactly 2 symbols (got {len(universe_symbols)})"
+            )
+        spy_symbol, qqq_symbol = universe_symbols[0], universe_symbols[1]
 
         def _get_int(key: str, default: int) -> int:
             raw = params.get(key, params.get(key.lower(), default))
@@ -117,6 +125,8 @@ def build_strategy(
             return float(raw)
 
         return NecPDT(
+            spy=spy_symbol,
+            qqq=qqq_symbol,
             M=_get_int("M", 6),
             V=_get_int("V", 12),
             eps=_get_float("eps", 1e-8),
@@ -139,9 +149,9 @@ def build_strategy(
         )
 
     if name in {"orb_trend", "orb-trend"}:
-        required = {"SPY", "QQQ"}
-        if not required.issubset({s.upper() for s in symbols}):
-            raise ValueError("orb_trend requires --symbols SPY,QQQ")
+        universe_symbols = [s.strip().upper() for s in symbols if s.strip()]
+        if not universe_symbols:
+            raise ValueError("orb_trend requires at least 1 symbol")
 
         def _get_int(key: str, default: int) -> int:
             raw = params.get(key, params.get(key.lower(), default))
@@ -152,6 +162,7 @@ def build_strategy(
             return float(raw)
 
         return OrbTrend(
+            symbols=tuple(universe_symbols),
             orb_minutes=_get_int("orb_minutes", 30),
             orb_breakout_bps=_get_float("orb_breakout_bps", 4.0),
             confirm_bars=_get_int("confirm_bars", 2),

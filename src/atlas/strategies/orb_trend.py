@@ -66,7 +66,7 @@ def _efficiency_ratio(close: pd.Series, window: int) -> float:
 @dataclass
 class OrbTrend(Strategy):
     """
-    Intraday ORB + VWAP trend strategy for SPY/QQQ (1–5m bars, RTH only).
+    Intraday ORB + VWAP trend strategy for a universe of symbols (1–5m bars, RTH only).
 
     New edge source (vs NEC-X):
       - Opening Range Breakout (ORB) continuation, confirmed on closes
@@ -85,9 +85,8 @@ class OrbTrend(Strategy):
 
     name: str = "orb_trend"
 
-    # Fixed universe
-    spy: str = "SPY"
-    qqq: str = "QQQ"
+    # Universe (default)
+    symbols: tuple[str, ...] = ("SPY", "QQQ")
 
     # ---- Tunable parameters (exactly 12) ----
     orb_minutes: int = 30
@@ -114,8 +113,22 @@ class OrbTrend(Strategy):
     def warmup_bars(self) -> int:
         return int(max(self.atr_window + 2, self.er_window + 2, self.confirm_bars + 10))
 
-    def _required_symbols(self) -> tuple[str, str]:
-        return (self.spy.upper(), self.qqq.upper())
+    def _universe(self) -> list[str]:
+        raw = getattr(self, "symbols", ())
+        if isinstance(raw, str):
+            parts = [s.strip() for s in raw.split(",")]
+        else:
+            parts = [str(s).strip() for s in raw]
+
+        out: list[str] = []
+        seen: set[str] = set()
+        for symbol in parts:
+            sym = symbol.upper()
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            out.append(sym)
+        return out
 
     def _session_start(self, ts_ny: pd.Timestamp) -> pd.Timestamp:
         return ts_ny.normalize() + pd.Timedelta(hours=9, minutes=30)
@@ -381,13 +394,15 @@ class OrbTrend(Strategy):
     def target_exposures(
         self, bars_by_symbol: dict[str, pd.DataFrame], state: StrategyState
     ) -> StrategyDecision:
-        spy, qqq = self._required_symbols()
+        universe = self._universe()
+        if not universe:
+            raise ValueError("orb_trend requires at least 1 symbol")
         decision_ts_ny = _to_ny(pd.Timestamp(state.timestamp))
 
         if self._risk_disabled_day is not None and decision_ts_ny.date() != self._risk_disabled_day:
             self._risk_disabled_day = None
 
-        targets = {spy: 0.0, qqq: 0.0}
+        targets = {sym: 0.0 for sym in universe}
         debug: dict[str, Any] = {
             "ts": decision_ts_ny.isoformat(),
             "day_return": float(state.day_return),
@@ -425,9 +440,7 @@ class OrbTrend(Strategy):
             )
 
         held_symbols = [
-            s
-            for s in (spy, qqq)
-            if abs(float(state.positions.get(s, 0.0))) > 1e-8
+            s for s in universe if abs(float(state.positions.get(s, 0.0))) > 1e-8
         ]
         if len(held_symbols) > 1:
             debug["held_symbols"] = held_symbols
@@ -442,10 +455,7 @@ class OrbTrend(Strategy):
         held_dir = _sign(held_qty) if held_symbol else 0
         debug["held_symbol"] = held_symbol
         debug["held_dir"] = int(held_dir)
-        debug["holding_bars"] = {
-            spy: int(state.holding_bars.get(spy, 0)),
-            qqq: int(state.holding_bars.get(qqq, 0)),
-        }
+        debug["holding_bars"] = {s: int(state.holding_bars.get(s, 0)) for s in universe}
 
         # If holding, manage exit only (no switching to reduce churn).
         if held_symbol is not None and held_dir != 0:
@@ -475,7 +485,7 @@ class OrbTrend(Strategy):
             )
 
         candidates: list[dict[str, Any]] = []
-        for sym in (spy, qqq):
+        for sym in universe:
             ok, info = self._entry_candidate(
                 symbol=sym,
                 df=bars_by_symbol.get(sym),
@@ -502,14 +512,13 @@ class OrbTrend(Strategy):
 
         debug["chosen"] = chosen
         debug["chosen_dir"] = int(dir_)
-        debug["gross_exposure"] = float(abs(targets[spy]) + abs(targets[qqq]))
+        debug["gross_exposure"] = float(sum(abs(targets[s]) for s in universe))
 
-        gross = abs(targets[spy]) + abs(targets[qqq])
+        gross = float(sum(abs(targets[s]) for s in universe))
         if gross > 1.0 + 1e-9:
             scale = 1.0 / gross
-            targets = {spy: float(targets[spy]) * scale, qqq: float(targets[qqq]) * scale}
+            targets = {s: float(targets[s]) * scale for s in universe}
             debug["gross_clamped"] = True
-            debug["gross_exposure"] = float(abs(targets[spy]) + abs(targets[qqq]))
+            debug["gross_exposure"] = float(sum(abs(targets[s]) for s in universe))
 
         return StrategyDecision(target_exposures=targets, reason="enter", debug=debug)
-
