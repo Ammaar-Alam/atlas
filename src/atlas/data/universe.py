@@ -72,6 +72,27 @@ def _load_csv_symbol(
     raise FileNotFoundError(f"no csv found for {symbol} in {csv_dir}")
 
 
+def _densify_crypto_bars(bars: pd.DataFrame, *, minutes: int) -> pd.DataFrame:
+    if len(bars) < 2 or minutes <= 0:
+        return bars
+    if not isinstance(bars.index, pd.DatetimeIndex):
+        raise ValueError("bars index must be a DatetimeIndex")
+    if bars.index.tz is None:
+        raise ValueError("bars index must be tz-aware")
+
+    bars = bars.sort_index()
+    start = bars.index.min().floor(f"{int(minutes)}min")
+    end = bars.index.max().floor(f"{int(minutes)}min")
+    full_index = pd.date_range(start=start, end=end, freq=f"{int(minutes)}min", tz=bars.index.tz)
+
+    out = bars.reindex(full_index)
+    for col in ["open", "high", "low", "close"]:
+        out[col] = out[col].ffill()
+    out = out.dropna(subset=["open", "high", "low", "close"])
+    out["volume"] = out["volume"].fillna(0.0)
+    return out[["open", "high", "low", "close", "volume"]].copy()
+
+
 def load_universe_bars(
     *,
     symbols: list[str],
@@ -154,6 +175,8 @@ def load_universe_bars(
                 minutes=timeframe.minutes,
                 drop_zero_volume=(mkt != Market.CRYPTO),
             )
+        if mkt == Market.CRYPTO:
+            bars = _densify_crypto_bars(bars, minutes=timeframe.minutes)
         bars_by_symbol[symbol] = bars
 
     for symbol, bars in bars_by_symbol.items():
