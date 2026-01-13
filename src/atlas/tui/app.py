@@ -4,6 +4,7 @@ import json
 import os
 import queue
 import time
+import csv
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
@@ -30,7 +31,7 @@ from atlas.data.universe import load_universe_bars
 from atlas.market import Market, coerce_symbols_for_market, default_symbols, parse_market
 from atlas.paper.runner import PaperConfig, run_paper_loop
 from atlas.strategies.registry import build_strategy, list_strategy_names
-from atlas.utils.time import now_ny, parse_iso_datetime
+from atlas.utils.time import NY_TZ, now_ny, parse_iso_datetime
 
 
 @dataclass
@@ -508,6 +509,9 @@ class AtlasTui(App):
             return
 
         self.state.market = mkt.value
+        if mkt == Market.CRYPTO:
+            self.state.paper_regular_hours_only = False
+            self.state.paper_allow_trading_when_closed = True
 
         strategy = self._canonicalize_strategy_name(self.state.strategy)
         current_symbols = [
@@ -1309,128 +1313,358 @@ class AtlasTui(App):
         except json.JSONDecodeError:
             return None
 
+    def _tail_jsonl_items(self, path: Path, *, max_items: int) -> list[dict]:
+        max_items = max(1, int(max_items))
+        if not path.exists():
+            return []
+        try:
+            with path.open("rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                if size <= 0:
+                    return []
+                read_size = min(size, 262144)
+                f.seek(-read_size, 2)
+                chunk = f.read().decode("utf-8", errors="ignore")
+        except OSError:
+            chunk = path.read_text(errors="ignore")
+
+        out: list[dict] = []
+        for ln in [ln for ln in chunk.splitlines() if ln.strip()][-max_items:]:
+            try:
+                item = json.loads(ln)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict):
+                out.append(item)
+        return out
+
+    def _tail_equity_curve(self, path: Path, *, max_rows: int) -> list[dict[str, str]]:
+        max_rows = max(1, int(max_rows))
+        if not path.exists():
+            return []
+        try:
+            with path.open("rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                if size <= 0:
+                    return []
+                read_size = min(size, 262144)
+                f.seek(-read_size, 2)
+                chunk = f.read().decode("utf-8", errors="ignore")
+        except OSError:
+            chunk = path.read_text(errors="ignore")
+
+        lines = [ln for ln in chunk.splitlines() if ln.strip()]
+        rows: list[dict[str, str]] = []
+        reader = csv.reader(lines)
+        for cols in reader:
+            if not cols:
+                continue
+            if cols[0].strip().lower() == "timestamp":
+                continue
+            if len(cols) < 2:
+                continue
+            row: dict[str, str] = {
+                "timestamp": str(cols[0]).strip(),
+                "equity": str(cols[1]).strip(),
+            }
+            if len(cols) >= 3:
+                row["day_return"] = str(cols[2]).strip()
+            rows.append(row)
+        return rows[-max_rows:]
+
     def _render_paper_live(self, decision: dict) -> None:
         results = self.query_one("#results", Static)
         results.border_title = "Paper (live)"
 
-        ts = str(decision.get("timestamp", ""))
+        now = pd.Timestamp.now(tz=NY_TZ)
+        decision_ts_raw = str(decision.get("timestamp", "")) or ""
+        decision_ts: Optional[pd.Timestamp]
+        try:
+            decision_ts = pd.Timestamp(decision_ts_raw)
+            if decision_ts.tzinfo is None:
+                decision_ts = decision_ts.tz_localize(NY_TZ)
+            else:
+                decision_ts = decision_ts.tz_convert(NY_TZ)
+        except Exception:
+            decision_ts = None
+
         targets = decision.get("targets", {}) or {}
         positions = decision.get("positions", {}) or {}
         debug = decision.get("debug", {}) or {}
 
-        summary = Table(show_header=False)
-        summary.add_column("k", style="bold")
-        summary.add_column("v")
-        summary.add_row("run_dir", str(self._paper_run_dir) if self._paper_run_dir else "-")
-        summary.add_row("timestamp", ts or "-")
-        summary.add_row("strategy", self.state.strategy)
-        summary.add_row("symbols", self.state.symbols)
-        summary.add_row("bar_timeframe", self.state.bar_timeframe)
-        summary.add_row("paper_feed", self.state.paper_feed)
-        summary.add_row("paper_rth_only", str(self.state.paper_regular_hours_only))
-        summary.add_row(
-            "paper_when_closed",
-            str(self.state.paper_allow_trading_when_closed),
-        )
-        summary.add_row("paper_limit_bps", f"{self.state.paper_limit_offset_bps:.2f}")
-        summary.add_row("reason", str(decision.get("reason") or "-"))
-        summary.add_row(
-            "targets",
-            "  ".join(f"{k}={float(v):+.2f}" for k, v in targets.items()) if targets else "-",
-        )
-        summary.add_row(
-            "positions",
-            "  ".join(f"{k}={float(v):+.4f}" for k, v in positions.items()) if positions else "-",
-        )
-        if "equity" in decision:
-            summary.add_row("equity", f"{float(decision['equity']):.2f}")
-        if "cash" in decision:
-            summary.add_row("cash", f"{float(decision['cash']):.2f}")
+        try:
+            tf = parse_bar_timeframe(self.state.bar_timeframe)
+            tf_minutes = max(int(tf.minutes), 1)
+        except Exception:
+            tf_minutes = 1
 
-        gates = Table(show_header=False)
-        gates.add_column("k", style="bold")
-        gates.add_column("v")
-        if "rho" in debug:
-            gates.add_row("rho", f"{float(debug['rho']):.3f}")
-        if "agree" in debug:
-            gates.add_row("agree", str(bool(debug["agree"])))
-        if "strength" in debug:
-            gates.add_row("strength", f"{float(debug['strength']):.3f}")
-        if "vol_ratio_max" in debug:
-            gates.add_row("vol_ratio_max", f"{float(debug['vol_ratio_max']):.3f}")
-        if "chosen" in debug:
-            gates.add_row("chosen", str(debug["chosen"]))
-        if "chosen_netEdge_bps" in debug:
-            gates.add_row("netEdge_bps", f"{float(debug['chosen_netEdge_bps']):.3f}")
-        if "dir" in debug:
-            gates.add_row("dir", str(int(debug["dir"])))
-        if "expMove_bps" in debug and isinstance(debug["expMove_bps"], dict):
-            gates.add_row(
-                "expMove_bps",
-                "  ".join(f"{k}={float(v):.2f}" for k, v in debug["expMove_bps"].items()),
-            )
-        if "costRT_bps" in debug and isinstance(debug["costRT_bps"], dict):
-            gates.add_row(
-                "costRT_bps",
-                "  ".join(f"{k}={float(v):.2f}" for k, v in debug["costRT_bps"].items()),
-            )
-        if "netEdge_bps" in debug and isinstance(debug["netEdge_bps"], dict):
-            gates.add_row(
-                "netEdge_bps_all",
-                "  ".join(f"{k}={float(v):.2f}" for k, v in debug["netEdge_bps"].items()),
-            )
+        bar_open = now.floor(f"{tf_minutes}min")
+        next_open = bar_open + pd.Timedelta(minutes=tf_minutes)
+        to_next_s = max(float((next_open - now).total_seconds()), 0.0)
+        since_decision_s = (
+            max(float((now - decision_ts).total_seconds()), 0.0) if decision_ts is not None else None
+        )
 
-        if "spy" in debug and isinstance(debug["spy"], dict):
-            spy = debug["spy"]
-            gates.add_row(
-                "SPY score/m/v",
-                f"{float(spy.get('score', 0.0)):+.3f}  {float(spy.get('m', 0.0)):+.6f}  {float(spy.get('v', 0.0)):.6f}",
-            )
-            gates.add_row(
-                "SPY vwap_dev/volr",
-                f"{float(spy.get('vwap_dev', 0.0)):+.4f}  {float(spy.get('vol_ratio', 0.0)):.3f}",
-            )
-        if "qqq" in debug and isinstance(debug["qqq"], dict):
-            qqq = debug["qqq"]
-            gates.add_row(
-                "QQQ score/m/v",
-                f"{float(qqq.get('score', 0.0)):+.3f}  {float(qqq.get('m', 0.0)):+.6f}  {float(qqq.get('v', 0.0)):.6f}",
-            )
-            gates.add_row(
-                "QQQ vwap_dev/volr",
-                f"{float(qqq.get('vwap_dev', 0.0)):+.4f}  {float(qqq.get('vol_ratio', 0.0)):.3f}",
-            )
+        mkt = parse_market(self.state.market)
+        feed_label = (
+            f"{self.state.paper_feed} (ignored in crypto)"
+            if mkt == Market.CRYPTO
+            else self.state.paper_feed
+        )
 
-        last_order = None
-        last_fill = None
+        equity_rows: list[dict[str, str]] = []
         if self._paper_run_dir:
-            last_order = self._tail_last_jsonl(self._paper_run_dir / "orders.jsonl")
-            last_fill = self._tail_last_jsonl(self._paper_run_dir / "fills.jsonl")
+            equity_rows = self._tail_equity_curve(self._paper_run_dir / "equity_curve.csv", max_rows=120)
+        equity_vals: list[float] = []
+        last_equity: Optional[float] = None
+        last_day_return: Optional[float] = None
+        for r in equity_rows:
+            try:
+                equity_vals.append(float(r.get("equity") or 0.0))
+            except Exception:
+                continue
+        if equity_vals:
+            last_equity = float(equity_vals[-1])
+        if equity_rows:
+            try:
+                last_day_return = float(equity_rows[-1].get("day_return") or 0.0)
+            except Exception:
+                last_day_return = None
 
-        tape = Table(show_header=False)
-        tape.add_column("k", style="bold")
-        tape.add_column("v")
+        equity_fallback = float(decision.get("equity") or 0.0) if "equity" in decision else None
+        cash_fallback = float(decision.get("cash") or 0.0) if "cash" in decision else None
+        equity_display = last_equity if last_equity is not None else equity_fallback
+        cash_display = cash_fallback
+
+        day_style = (
+            "green"
+            if (last_day_return is not None and last_day_return >= 0)
+            else "red"
+            if (last_day_return is not None and last_day_return < 0)
+            else "cyan"
+        )
+        eq_style = (
+            "green"
+            if len(equity_vals) >= 2 and equity_vals[-1] >= equity_vals[-2]
+            else "red"
+            if len(equity_vals) >= 2
+            else "cyan"
+        )
+
+        kpis = Table.grid(expand=True)
+        kpis.add_column(ratio=1)
+        kpis.add_column(ratio=1)
+        kpis.add_column(ratio=1)
+        kpis.add_row(
+            Panel(
+                Align.center(
+                    Text(
+                        f"${equity_display:,.2f}" if equity_display is not None else "-",
+                        style=f"bold {eq_style}",
+                    )
+                ),
+                title="Equity",
+                border_style=eq_style,
+                box=box.ROUNDED,
+                padding=(1, 2),
+            ),
+            Panel(
+                Align.center(
+                    Text(
+                        f"{last_day_return:+.2%}" if last_day_return is not None else "-",
+                        style=f"bold {day_style}",
+                    )
+                ),
+                title="Day Return",
+                border_style=day_style,
+                box=box.ROUNDED,
+                padding=(1, 2),
+            ),
+            Panel(
+                Align.center(
+                    Text(
+                        f"{to_next_s:,.1f}s",
+                        style="bold cyan",
+                    )
+                ),
+                title="Next Bar",
+                border_style="cyan",
+                box=box.ROUNDED,
+                padding=(1, 2),
+            ),
+        )
+
+        last_orders = []
+        last_fills = []
+        if self._paper_run_dir:
+            last_orders = self._tail_jsonl_items(self._paper_run_dir / "orders.jsonl", max_items=6)
+            last_fills = self._tail_jsonl_items(self._paper_run_dir / "fills.jsonl", max_items=6)
+        last_order = last_orders[-1] if last_orders else None
+        last_fill = last_fills[-1] if last_fills else None
+
+        meta = Table(show_header=False, box=box.SIMPLE)
+        meta.add_column("k", style="bold")
+        meta.add_column("v")
+        meta.add_row("market", mkt.value)
+        if self._paper_run_dir is not None:
+            meta.add_row("run_dir", str(self._paper_run_dir))
+        meta.add_row("strategy", self.state.strategy)
+        meta.add_row("symbols", self.state.symbols)
+        meta.add_row("bar_timeframe", self.state.bar_timeframe)
+        meta.add_row("lookback", str(self.state.paper_lookback_bars))
+        meta.add_row("poll_s", str(self.state.paper_poll_seconds))
+        meta.add_row("dry_run", str(self.state.paper_dry_run))
+        meta.add_row("feed", feed_label)
+        meta.add_row("rth_only", str(self.state.paper_regular_hours_only))
+        meta.add_row("when_closed", str(self.state.paper_allow_trading_when_closed))
+        meta.add_row("limit_bps", f"{self.state.paper_limit_offset_bps:.2f}")
+        meta.add_row("reason", str(decision.get("reason") or "-"))
+        if decision_ts is not None:
+            meta.add_row("decision_ts", decision_ts.isoformat())
+        if since_decision_s is not None:
+            meta.add_row("age", f"{since_decision_s:,.1f}s")
+        meta.add_row("next_open", next_open.isoformat())
+        if cash_display is not None:
+            meta.add_row("cash", f"${float(cash_display):,.2f}")
+        if "chosen" in debug:
+            meta.add_row("chosen", str(debug.get("chosen")))
+        if "chosen_netEdge_bps" in debug:
+            meta.add_row("netEdge_bps", f"{float(debug.get('chosen_netEdge_bps') or 0.0):+.2f}")
         if last_order:
-            tape.add_row(
+            meta.add_row(
                 "last_order",
                 f"{last_order.get('symbol')} {last_order.get('side')} qty={last_order.get('qty')} id={last_order.get('order_id')}",
             )
         if last_fill:
-            tape.add_row(
+            meta.add_row(
                 "last_fill",
                 f"{last_fill.get('symbol')} {last_fill.get('side')} qty={last_fill.get('filled_qty')} px={last_fill.get('filled_avg_price')} status={last_fill.get('status')}",
             )
 
-        results.update(Group(summary, "", gates, "", tape))
+        pos_table = Table(box=box.SIMPLE, show_header=True, header_style="bold")
+        pos_table.add_column("symbol", style="bold")
+        pos_table.add_column("target", justify="right")
+        pos_table.add_column("pos_qty", justify="right")
+
+        symbols = sorted(set(list(targets.keys()) + list(positions.keys())))
+        if not symbols:
+            pos_table.add_row("-", "0.00", "0.0000")
+        else:
+            for sym in symbols:
+                tgt = float(targets.get(sym, 0.0) or 0.0)
+                qty = float(positions.get(sym, 0.0) or 0.0)
+                s = "green" if qty > 0 else "red" if qty < 0 else "cyan"
+                pos_table.add_row(sym, Text(f"{tgt:+.2f}", style=s), Text(f"{qty:+.4f}", style=s))
+
+        tape = Table(box=box.SIMPLE, show_header=True, header_style="bold")
+        tape.add_column("ts", no_wrap=True)
+        tape.add_column("type", style="bold")
+        tape.add_column("symbol", style="bold")
+        tape.add_column("side")
+        tape.add_column("qty", justify="right")
+        tape.add_column("px/status", justify="right")
+
+        events: list[tuple[pd.Timestamp, dict]] = []
+        for o in last_orders:
+            try:
+                t = pd.Timestamp(str(o.get("timestamp") or ""))
+            except Exception:
+                continue
+            events.append((t, {"type": "order", **o}))
+        for f in last_fills:
+            try:
+                t = pd.Timestamp(str(f.get("timestamp") or ""))
+            except Exception:
+                continue
+            events.append((t, {"type": "fill", **f}))
+        events.sort(key=lambda x: x[0])
+        events = events[-12:]
+
+        if not events:
+            tape.add_row("-", "-", "-", "-", "-", "-")
+        else:
+            for t, e in events:
+                kind = str(e.get("type"))
+                sym = str(e.get("symbol") or "-")
+                side = str(e.get("side") or "-")
+                if kind == "fill":
+                    qty = str(e.get("filled_qty") or "-")
+                    px = str(e.get("filled_avg_price") or e.get("status") or "-")
+                    kind_style = "green"
+                else:
+                    qty = str(e.get("qty") or "-")
+                    px = str(e.get("order_id") or ("dry_run" if e.get("dry_run") else "-"))
+                    kind_style = "cyan"
+                tape.add_row(
+                    t.tz_convert(NY_TZ).strftime("%H:%M:%S") if t.tzinfo else str(t),
+                    Text(kind, style=f"bold {kind_style}"),
+                    sym,
+                    side,
+                    qty,
+                    px,
+                )
+
+        spark = self._sparkline(equity_vals, width=80)
+        spark_style = eq_style
+        spark_panel = Panel(
+            Align.center(Text(spark or "-", style=spark_style)),
+            title="Equity (recent)",
+            border_style=spark_style,
+            box=box.ROUNDED,
+            padding=(1, 2),
+        )
+
+        results.update(
+            Group(
+                kpis,
+                "",
+                Panel(meta, title="State", border_style="cyan", box=box.ROUNDED),
+                "",
+                Panel(pos_table, title="Targets / Positions", border_style="magenta", box=box.ROUNDED),
+                "",
+                Panel(tape, title="Tape (recent orders/fills)", border_style="yellow", box=box.ROUNDED),
+                "",
+                spark_panel,
+            )
+        )
 
     def _refresh_live_view(self) -> None:
+        if self._backtest_thread is not None:
+            return
         if self._paper_run_dir is None:
             return
         decision = self._tail_last_jsonl(self._paper_run_dir / "decisions.jsonl")
         if not decision:
+            if self._paper_thread is not None:
+                results = self.query_one("#results", Static)
+                results.border_title = "Paper (live)"
+                body = Table(show_header=False, box=box.SIMPLE)
+                body.add_column("k", style="bold")
+                body.add_column("v")
+                body.add_row("status", "waiting for first decision…")
+
+                try:
+                    tf = parse_bar_timeframe(self.state.bar_timeframe)
+                    tf_minutes = max(int(tf.minutes), 1)
+                except Exception:
+                    tf_minutes = 1
+
+                now = pd.Timestamp.now(tz=NY_TZ)
+                bar_open = now.floor(f"{tf_minutes}min")
+                next_open = bar_open + pd.Timedelta(minutes=tf_minutes)
+                to_next_s = max(float((next_open - now).total_seconds()), 0.0)
+
+                body.add_row("now", now.strftime("%Y-%m-%d %H:%M:%S %Z"))
+                body.add_row("next_bar", next_open.strftime("%Y-%m-%d %H:%M:%S %Z"))
+                body.add_row("in", f"{to_next_s:.0f}s")
+                body.add_row("bar_timeframe", str(self.state.bar_timeframe))
+                body.add_row("run_dir", str(self._paper_run_dir))
+                results.update(Panel(body, title="Paper", border_style="cyan", box=box.ROUNDED))
             return
         ts = str(decision.get("timestamp", ""))
-        if ts and ts == self._last_live_decision_ts:
+        if self._paper_thread is None and ts and ts == self._last_live_decision_ts:
             return
         self._last_live_decision_ts = ts
         self._render_paper_live(decision)

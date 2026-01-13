@@ -131,6 +131,10 @@ class OrbTrend(Strategy):
         return out
 
     def _session_start(self, ts_ny: pd.Timestamp) -> pd.Timestamp:
+        # Equity ORB uses NYSE open; crypto runs 24/7 so we anchor the "session"
+        # to the NY day boundary for a consistent daily reset.
+        if any("/" in s for s in self._universe()):
+            return ts_ny.normalize()
         return ts_ny.normalize() + pd.Timedelta(hours=9, minutes=30)
 
     def _compute_intraday_vwap(self, df_today: pd.DataFrame) -> float:
@@ -409,17 +413,21 @@ class OrbTrend(Strategy):
             "allow_short": bool(state.allow_short),
         }
 
-        # Session/time constraints.
-        if decision_ts_ny.time() < time(9, 30) or decision_ts_ny.time() > time(16, 0):
-            return StrategyDecision(
-                target_exposures=targets, reason="outside_rth", debug=debug
-            )
+        crypto_mode = any("/" in s for s in universe)
+        debug["crypto_mode"] = bool(crypto_mode)
 
-        # Hard exit: must be flat by/after 15:55 ET.
-        if decision_ts_ny.time() >= time(15, 55):
-            return StrategyDecision(
-                target_exposures=targets, reason="forced_flat", debug=debug
-            )
+        if not crypto_mode:
+            # Session/time constraints (equities only).
+            if decision_ts_ny.time() < time(9, 30) or decision_ts_ny.time() > time(16, 0):
+                return StrategyDecision(
+                    target_exposures=targets, reason="outside_rth", debug=debug
+                )
+
+            # Hard exit: must be flat by/after 15:55 ET.
+            if decision_ts_ny.time() >= time(15, 55):
+                return StrategyDecision(
+                    target_exposures=targets, reason="forced_flat", debug=debug
+                )
 
         # Risk controls (daily).
         if float(state.day_return) <= -float(self.kill_switch):
@@ -478,11 +486,12 @@ class OrbTrend(Strategy):
             targets[held_symbol] = float(held_dir)
             return StrategyDecision(target_exposures=targets, reason="hold", debug=debug)
 
-        # Flat: respect "no new entries after 15:30" hard constraint.
-        if decision_ts_ny.time() > time(15, 30):
-            return StrategyDecision(
-                target_exposures=targets, reason="entry_cutoff", debug=debug
-            )
+        if not crypto_mode:
+            # Flat: respect "no new entries after 15:30" hard constraint.
+            if decision_ts_ny.time() > time(15, 30):
+                return StrategyDecision(
+                    target_exposures=targets, reason="entry_cutoff", debug=debug
+                )
 
         candidates: list[dict[str, Any]] = []
         for sym in universe:
