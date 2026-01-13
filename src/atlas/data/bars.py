@@ -35,7 +35,9 @@ def parse_bar_timeframe(value: str) -> BarTimeframe:
     raise ValueError("unsupported bar timeframe, expected like 1Min or 5Min")
 
 
-def resample_ohlcv(bars: pd.DataFrame, *, minutes: int) -> pd.DataFrame:
+def resample_ohlcv(
+    bars: pd.DataFrame, *, minutes: int, drop_zero_volume: bool = True
+) -> pd.DataFrame:
     if len(bars) < 2 or minutes <= 1:
         return bars.copy()
 
@@ -58,7 +60,8 @@ def resample_ohlcv(bars: pd.DataFrame, *, minutes: int) -> pd.DataFrame:
         .dropna(subset=["open", "high", "low", "close"])
     )
     out["volume"] = out["volume"].fillna(0.0)
-    out = out[out["volume"] > 0]
+    if drop_zero_volume:
+        out = out[out["volume"] > 0]
     return out[["open", "high", "low", "close", "volume"]].copy()
 
 

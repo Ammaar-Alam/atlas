@@ -93,6 +93,9 @@ def load_universe_bars(
         raise ValueError("symbols must be non-empty")
 
     mkt = parse_market(market)
+    if mkt == Market.CRYPTO and regular_hours_only:
+        # Crypto trades 24/7; don't drop overnight/weekend bars by default.
+        regular_hours_only = False
     assume_tz = ZoneInfo("UTC") if mkt == Market.CRYPTO else NY_TZ
 
     bars_by_symbol: dict[str, pd.DataFrame] = {}
@@ -146,7 +149,11 @@ def load_universe_bars(
         if regular_hours_only:
             bars = filter_regular_hours(bars)
         if timeframe.minutes > 1:
-            bars = resample_ohlcv(bars, minutes=timeframe.minutes)
+            bars = resample_ohlcv(
+                bars,
+                minutes=timeframe.minutes,
+                drop_zero_volume=(mkt != Market.CRYPTO),
+            )
         bars_by_symbol[symbol] = bars
 
     for symbol, bars in bars_by_symbol.items():
