@@ -33,11 +33,11 @@ class NecX(Strategy):
     M: int = 6
     V: int = 12
     Wcorr: int = 12
-    rho_min: float = 0.60
-    strength_entry: float = 0.80
+    rho_min: float = 0.90
+    strength_entry: float = 1.20
     strength_exit: float = 0.20
     H_max: int = 6
-    k_cost: float = 1.25
+    k_cost: float = 2.00
     spread_floor_bps: float = 0.50
     slip_bps: float = 0.75
     daily_loss_limit: float = 0.010
@@ -49,19 +49,35 @@ class NecX(Strategy):
     eps: float = 1e-8
 
     # internal running state (for speed + clean daily resets)
-    _last_processed: Optional[pd.Timestamp] = field(default=None, init=False, repr=False)
+    _last_processed: Optional[pd.Timestamp] = field(
+        default=None, init=False, repr=False
+    )
     _bars_seen: int = field(default=0, init=False, repr=False)
     _risk_disabled_day: Optional[object] = field(default=None, init=False, repr=False)
 
-    _prev_close: dict[str, Optional[float]] = field(default_factory=dict, init=False, repr=False)
-    _ema_m: dict[str, Optional[float]] = field(default_factory=dict, init=False, repr=False)
-    _ema_v: dict[str, Optional[float]] = field(default_factory=dict, init=False, repr=False)
-    _ema_vol_s: dict[str, Optional[float]] = field(default_factory=dict, init=False, repr=False)
-    _ema_vol_l: dict[str, Optional[float]] = field(default_factory=dict, init=False, repr=False)
-    _vwap_day: dict[str, Optional[object]] = field(default_factory=dict, init=False, repr=False)
+    _prev_close: dict[str, Optional[float]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _ema_m: dict[str, Optional[float]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _ema_v: dict[str, Optional[float]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _ema_vol_s: dict[str, Optional[float]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _ema_vol_l: dict[str, Optional[float]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _vwap_day: dict[str, Optional[object]] = field(
+        default_factory=dict, init=False, repr=False
+    )
     _vwap_num: dict[str, float] = field(default_factory=dict, init=False, repr=False)
     _vwap_den: dict[str, float] = field(default_factory=dict, init=False, repr=False)
-    _last_features: dict[str, dict[str, float]] = field(default_factory=dict, init=False, repr=False)
+    _last_features: dict[str, dict[str, float]] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     _rets: dict[str, deque[float]] = field(default_factory=dict, init=False, repr=False)
 
@@ -130,14 +146,30 @@ class NecX(Strategy):
 
                 m_prev = self._ema_m.get(symbol)
                 v_prev = self._ema_v.get(symbol)
-                m = r if m_prev is None else (alpha_m * r + (1.0 - alpha_m) * float(m_prev))
-                v = abs(r) if v_prev is None else (alpha_v * abs(r) + (1.0 - alpha_v) * float(v_prev))
+                m = (
+                    r
+                    if m_prev is None
+                    else (alpha_m * r + (1.0 - alpha_m) * float(m_prev))
+                )
+                v = (
+                    abs(r)
+                    if v_prev is None
+                    else (alpha_v * abs(r) + (1.0 - alpha_v) * float(v_prev))
+                )
                 score = float(m) / (float(v) + self.eps)
 
                 vs_prev = self._ema_vol_s.get(symbol)
                 vl_prev = self._ema_vol_l.get(symbol)
-                vs = vol if vs_prev is None else (alpha_vs * vol + (1.0 - alpha_vs) * float(vs_prev))
-                vl = vol if vl_prev is None else (alpha_vl * vol + (1.0 - alpha_vl) * float(vl_prev))
+                vs = (
+                    vol
+                    if vs_prev is None
+                    else (alpha_vs * vol + (1.0 - alpha_vs) * float(vs_prev))
+                )
+                vl = (
+                    vol
+                    if vl_prev is None
+                    else (alpha_vl * vol + (1.0 - alpha_vl) * float(vl_prev))
+                )
                 vol_ratio = float(vs) / float(vl) if float(vl) > 0 else 0.0
 
                 d = pd.Timestamp(ts).tz_convert(NY_TZ).date()
@@ -147,7 +179,9 @@ class NecX(Strategy):
                     self._vwap_den[symbol] = 0.0
 
                 tp = (high + low + close) / 3.0
-                self._vwap_num[symbol] = float(self._vwap_num.get(symbol, 0.0)) + tp * vol
+                self._vwap_num[symbol] = (
+                    float(self._vwap_num.get(symbol, 0.0)) + tp * vol
+                )
                 self._vwap_den[symbol] = float(self._vwap_den.get(symbol, 0.0)) + vol
                 vwap = (
                     float(self._vwap_num[symbol]) / float(self._vwap_den[symbol])
@@ -201,7 +235,9 @@ class NecX(Strategy):
             return False
         if spy not in self._last_features or qqq not in self._last_features:
             return False
-        if len(self._rets.get(spy, [])) < int(self.Wcorr) or len(self._rets.get(qqq, [])) < int(self.Wcorr):
+        if len(self._rets.get(spy, [])) < int(self.Wcorr) or len(
+            self._rets.get(qqq, [])
+        ) < int(self.Wcorr):
             return False
         return True
 
@@ -233,7 +269,10 @@ class NecX(Strategy):
         else:
             decision_ts = decision_ts.tz_convert(NY_TZ)
 
-        if self._risk_disabled_day is not None and decision_ts.date() != self._risk_disabled_day:
+        if (
+            self._risk_disabled_day is not None
+            and decision_ts.date() != self._risk_disabled_day
+        ):
             self._risk_disabled_day = None
 
         self._update_from_bars(bars_by_symbol)
@@ -244,32 +283,46 @@ class NecX(Strategy):
             "bars_seen": int(self._bars_seen),
         }
 
-        held_symbols = [s for s in (spy, qqq) if abs(float(state.positions.get(s, 0.0))) > 1e-8]
+        held_symbols = [
+            s for s in (spy, qqq) if abs(float(state.positions.get(s, 0.0))) > 1e-8
+        ]
         held_symbol = held_symbols[0] if len(held_symbols) == 1 else None
         held_qty = float(state.positions.get(held_symbol, 0.0)) if held_symbol else 0.0
         held_dir = _sign(held_qty) if held_symbol else 0
 
         debug["held_symbol"] = held_symbol
         debug["held_dir"] = held_dir
-        debug["holding_bars"] = {s: int(state.holding_bars.get(s, 0)) for s in (spy, qqq)}
+        debug["holding_bars"] = {
+            s: int(state.holding_bars.get(s, 0)) for s in (spy, qqq)
+        }
         debug["day_return"] = float(state.day_return)
 
         if decision_ts.time() < time(9, 30) or decision_ts.time() > time(16, 0):
-            return StrategyDecision(target_exposures=targets, reason="outside_rth", debug=debug)
+            return StrategyDecision(
+                target_exposures=targets, reason="outside_rth", debug=debug
+            )
 
         if decision_ts.time() >= time(15, 55):
-            return StrategyDecision(target_exposures=targets, reason="forced_flat", debug=debug)
+            return StrategyDecision(
+                target_exposures=targets, reason="forced_flat", debug=debug
+            )
 
         if float(state.day_return) <= -float(self.kill_switch):
             self._risk_disabled_day = decision_ts.date()
-            return StrategyDecision(target_exposures=targets, reason="kill_switch", debug=debug)
+            return StrategyDecision(
+                target_exposures=targets, reason="kill_switch", debug=debug
+            )
 
         if float(state.day_return) <= -float(self.daily_loss_limit):
             self._risk_disabled_day = decision_ts.date()
-            return StrategyDecision(target_exposures=targets, reason="daily_loss_limit", debug=debug)
+            return StrategyDecision(
+                target_exposures=targets, reason="daily_loss_limit", debug=debug
+            )
 
         if not self._ready():
-            return StrategyDecision(target_exposures=targets, reason="warmup", debug=debug)
+            return StrategyDecision(
+                target_exposures=targets, reason="warmup", debug=debug
+            )
 
         spy_score = float(self._last_features[spy]["score"])
         qqq_score = float(self._last_features[qqq]["score"])
@@ -277,7 +330,12 @@ class NecX(Strategy):
         agree = dir_ != 0 and dir_ == _sign(qqq_score)
         strength = float(min(abs(spy_score), abs(qqq_score)))
         rho = float(self._corr())
-        vol_ratio_gate = float(max(self._last_features[spy]["vol_ratio"], self._last_features[qqq]["vol_ratio"]))
+        vol_ratio_gate = float(
+            max(
+                self._last_features[spy]["vol_ratio"],
+                self._last_features[qqq]["vol_ratio"],
+            )
+        )
 
         debug.update(
             {
@@ -293,14 +351,22 @@ class NecX(Strategy):
 
         if not state.allow_short and dir_ < 0:
             if held_symbol is not None:
-                return StrategyDecision(target_exposures=targets, reason="long_only_exit", debug=debug)
-            return StrategyDecision(target_exposures=targets, reason="long_only_abstain", debug=debug)
+                return StrategyDecision(
+                    target_exposures=targets, reason="long_only_exit", debug=debug
+                )
+            return StrategyDecision(
+                target_exposures=targets, reason="long_only_abstain", debug=debug
+            )
 
         if held_symbol is not None:
             if (not agree) or float(strength) < float(self.strength_exit):
-                return StrategyDecision(target_exposures=targets, reason="signal_decay_exit", debug=debug)
+                return StrategyDecision(
+                    target_exposures=targets, reason="signal_decay_exit", debug=debug
+                )
             if int(state.holding_bars.get(held_symbol, 0)) >= int(self.H_max):
-                return StrategyDecision(target_exposures=targets, reason="max_holding_exit", debug=debug)
+                return StrategyDecision(
+                    target_exposures=targets, reason="max_holding_exit", debug=debug
+                )
 
             entry_window = time(9, 40) <= decision_ts.time() <= time(15, 30)
             entry_gates_pass = (
@@ -312,8 +378,16 @@ class NecX(Strategy):
             if entry_window and entry_gates_pass and dir_ != 0:
                 cost_spy = float(self._cost_rt_bps(spy))
                 cost_qqq = float(self._cost_rt_bps(qqq))
-                exp_spy = abs(float(self._last_features[spy]["m"])) * float(self.H_max) * 10_000.0
-                exp_qqq = abs(float(self._last_features[qqq]["m"])) * float(self.H_max) * 10_000.0
+                exp_spy = (
+                    abs(float(self._last_features[spy]["m"]))
+                    * float(self.H_max)
+                    * 10_000.0
+                )
+                exp_qqq = (
+                    abs(float(self._last_features[qqq]["m"]))
+                    * float(self.H_max)
+                    * 10_000.0
+                )
                 net_spy = float(exp_spy) - float(self.k_cost) * float(cost_spy)
                 net_qqq = float(exp_qqq) - float(self.k_cost) * float(cost_qqq)
 
@@ -339,27 +413,45 @@ class NecX(Strategy):
                         )
 
             targets[held_symbol] = float(held_dir)
-            return StrategyDecision(target_exposures=targets, reason="hold", debug=debug)
+            return StrategyDecision(
+                target_exposures=targets, reason="hold", debug=debug
+            )
 
         if self._risk_disabled_day == decision_ts.date():
-            return StrategyDecision(target_exposures=targets, reason="risk_disabled", debug=debug)
+            return StrategyDecision(
+                target_exposures=targets, reason="risk_disabled", debug=debug
+            )
 
         if decision_ts.time() < time(9, 40) or decision_ts.time() > time(15, 30):
-            return StrategyDecision(target_exposures=targets, reason="entry_time_gate", debug=debug)
+            return StrategyDecision(
+                target_exposures=targets, reason="entry_time_gate", debug=debug
+            )
 
         if float(rho) < float(self.rho_min):
-            return StrategyDecision(target_exposures=targets, reason="gate_rho", debug=debug)
+            return StrategyDecision(
+                target_exposures=targets, reason="gate_rho", debug=debug
+            )
         if not agree:
-            return StrategyDecision(target_exposures=targets, reason="gate_agree", debug=debug)
+            return StrategyDecision(
+                target_exposures=targets, reason="gate_agree", debug=debug
+            )
         if float(strength) < float(self.strength_entry):
-            return StrategyDecision(target_exposures=targets, reason="gate_strength", debug=debug)
+            return StrategyDecision(
+                target_exposures=targets, reason="gate_strength", debug=debug
+            )
         if float(vol_ratio_gate) < float(self.vol_ratio_min):
-            return StrategyDecision(target_exposures=targets, reason="gate_liquidity", debug=debug)
+            return StrategyDecision(
+                target_exposures=targets, reason="gate_liquidity", debug=debug
+            )
 
         cost_spy = float(self._cost_rt_bps(spy))
         cost_qqq = float(self._cost_rt_bps(qqq))
-        exp_spy = abs(float(self._last_features[spy]["m"])) * float(self.H_max) * 10_000.0
-        exp_qqq = abs(float(self._last_features[qqq]["m"])) * float(self.H_max) * 10_000.0
+        exp_spy = (
+            abs(float(self._last_features[spy]["m"])) * float(self.H_max) * 10_000.0
+        )
+        exp_qqq = (
+            abs(float(self._last_features[qqq]["m"])) * float(self.H_max) * 10_000.0
+        )
 
         net_spy = float(exp_spy) - float(self.k_cost) * float(cost_spy)
         net_qqq = float(exp_qqq) - float(self.k_cost) * float(cost_qqq)

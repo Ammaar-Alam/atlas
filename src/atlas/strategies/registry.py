@@ -35,8 +35,9 @@ def build_strategy(
     symbols: list[str],
     fast_window: int,
     slow_window: int,
+    params: Optional[Dict[str, Any]] = None,
 ) -> Strategy:
-    params = _load_params(params_path)
+    params = params if params is not None else _load_params(params_path)
 
     if name == "ma_crossover":
         fast = int(params.get("fast_window", fast_window))

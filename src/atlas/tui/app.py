@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Event, Thread
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 from rich.console import Group
@@ -40,6 +40,7 @@ class TuiState:
     strategy: str = "ma_crossover"
     fast_window: int = 10
     slow_window: int = 30
+    strategy_params: dict[str, dict[str, Any]] = field(default_factory=dict)
     initial_cash: float = 100_000.0
     max_position_notional_usd: float = 10_000.0
     slippage_bps: float = 0.0
@@ -60,6 +61,49 @@ class TuiState:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+STRATEGY_PARAM_SPECS: dict[str, dict[str, type]] = {
+    "ma_crossover": {
+        "fast_window": int,
+        "slow_window": int,
+    },
+    "nec_x": {
+        "M": int,
+        "V": int,
+        "Wcorr": int,
+        "rho_min": float,
+        "strength_entry": float,
+        "strength_exit": float,
+        "H_max": int,
+        "k_cost": float,
+        "spread_floor_bps": float,
+        "slip_bps": float,
+        "daily_loss_limit": float,
+        "kill_switch": float,
+    },
+}
+
+STRATEGY_DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
+    "ma_crossover": {
+        "fast_window": 10,
+        "slow_window": 30,
+    },
+    "nec_x": {
+        "M": 6,
+        "V": 12,
+        "Wcorr": 12,
+        "rho_min": 0.60,
+        "strength_entry": 0.80,
+        "strength_exit": 0.20,
+        "H_max": 6,
+        "k_cost": 1.25,
+        "spread_floor_bps": 0.50,
+        "slip_bps": 0.75,
+        "daily_loss_limit": 0.010,
+        "kill_switch": 0.025,
+    },
+}
 
 
 def _parse_relative_timeframe(spec: str) -> timedelta:
@@ -153,6 +197,8 @@ class AtlasTui(App):
         "/bars",
         "/algorithm",
         "/strategy",
+        "/param",
+        "/params",
         "/fast",
         "/slow",
         "/cash",
@@ -245,6 +291,91 @@ class AtlasTui(App):
             self._autosave_enabled = False
             self._write_log(f"failed to save config ({path}): {exc}")
 
+    def _canonicalize_strategy_name(self, name: str) -> str:
+        name = name.strip()
+        if name == "nec-x":
+            return "nec_x"
+        return name
+
+    def _strategy_param_spec(self, strategy: str) -> dict[str, type]:
+        return STRATEGY_PARAM_SPECS.get(strategy, {})
+
+    def _ensure_strategy_params(self, strategy: str) -> None:
+        alias_map = {"nec_x": "nec-x"}
+        alias = alias_map.get(strategy)
+        if alias and alias in self.state.strategy_params and strategy not in self.state.strategy_params:
+            self.state.strategy_params[strategy] = self.state.strategy_params.pop(alias)
+
+        if strategy not in self.state.strategy_params:
+            if strategy == "ma_crossover":
+                defaults = {
+                    "fast_window": self.state.fast_window,
+                    "slow_window": self.state.slow_window,
+                }
+            else:
+                defaults = STRATEGY_DEFAULT_PARAMS.get(strategy, {})
+            self.state.strategy_params[strategy] = dict(defaults)
+
+        if strategy == "ma_crossover":
+            params = self.state.strategy_params.get(strategy, {})
+            if "fast_window" in params:
+                self.state.fast_window = int(params["fast_window"])
+            if "slow_window" in params:
+                self.state.slow_window = int(params["slow_window"])
+
+    def _normalize_param_key(self, strategy: str, key: str) -> str:
+        spec = self._strategy_param_spec(strategy)
+        if spec:
+            for candidate in spec:
+                if candidate.lower() == key.lower():
+                    return candidate
+        return key
+
+    def _format_param_value(self, value: Any) -> str:
+        if isinstance(value, float):
+            return f"{value:.6g}"
+        return str(value)
+
+    def _format_strategy_params(self, strategy: str, params: dict[str, Any]) -> str:
+        if not params:
+            return "-"
+        spec = self._strategy_param_spec(strategy)
+        ordered = list(spec.keys())
+        for key in params:
+            if key not in ordered:
+                ordered.append(key)
+        parts = [f"{k}={self._format_param_value(params[k])}" for k in ordered if k in params]
+        per_line = 4
+        lines = [
+            "  ".join(parts[i : i + per_line])
+            for i in range(0, len(parts), per_line)
+        ]
+        return "\n".join(lines)
+
+    def _parse_int_value(self, raw: str) -> int:
+        try:
+            return int(raw)
+        except ValueError:
+            value = float(raw)
+            if not value.is_integer():
+                raise ValueError("expected integer") from None
+            return int(value)
+
+    def _parse_param_value(self, strategy: str, key: str, raw: str) -> Any:
+        spec = self._strategy_param_spec(strategy)
+        if spec and key in spec:
+            expected = spec[key]
+            if expected is int:
+                return self._parse_int_value(raw)
+            return float(raw)
+        try:
+            return self._parse_int_value(raw)
+        except Exception:
+            try:
+                return float(raw)
+            except Exception:
+                return raw
+
     def _canonicalize_command(self, token: str) -> str:
         token = token.strip().lower()
         return self.COMMAND_ALIASES.get(token, token)
@@ -283,6 +414,10 @@ class AtlasTui(App):
             return ["1Min", "5Min"]
         if cmd == "/algorithm":
             return list_strategy_names()
+        if cmd == "/param":
+            strategy = self._canonicalize_strategy_name(self.state.strategy)
+            spec = self._strategy_param_spec(strategy)
+            return list(spec.keys()) if spec else []
         if cmd == "/timeframe":
             return ["6h", "7d", "30d", "180d", "1y", "clear"]
         if cmd == "/csv":
@@ -388,6 +523,8 @@ class AtlasTui(App):
         suggestions.display = False
         self.query_one("#input", Input).focus()
         self._load_config()
+        self.state.strategy = self._canonicalize_strategy_name(self.state.strategy)
+        self._ensure_strategy_params(self.state.strategy)
         self._render_settings()
         self._render_results(None)
         self.set_interval(0.5, self._refresh_live_view)
@@ -486,6 +623,7 @@ class AtlasTui(App):
             self._write_log(
                 "commands: /backtest, /paper start|stop, /timeframe <7d|6h|1m|1y|clear>, "
                 "/bar <1Min|5Min>, /algorithm <name>, /data <sample|csv|alpaca>, "
+                "/param <key> <value>, /params, "
                 "/fast <int>, /slow <int>, /cash <usd>, /maxnotional <usd>, /slippage <bps>, /short <true|false>, "
                 "/feed <iex|delayed_sip|sip>, /paperfeed <iex|delayed_sip|sip>, /csv <path>, "
                 "/paperlookback <bars>, /paperpoll <seconds>, /papermaxnotional <usd>, "
@@ -540,7 +678,9 @@ class AtlasTui(App):
             if value <= 0:
                 self._write_log("fast must be > 0")
                 return
+            self._ensure_strategy_params("ma_crossover")
             self.state.fast_window = value
+            self.state.strategy_params["ma_crossover"]["fast_window"] = value
             self._render_settings()
             return
 
@@ -553,7 +693,9 @@ class AtlasTui(App):
             if value <= 0:
                 self._write_log("slow must be > 0")
                 return
+            self._ensure_strategy_params("ma_crossover")
             self.state.slow_window = value
+            self.state.strategy_params["ma_crossover"]["slow_window"] = value
             self._render_settings()
             return
 
@@ -725,11 +867,44 @@ class AtlasTui(App):
             return
 
         if cmd in {"/algorithm", "/strategy", "/aglorithm", "/algorithim"} and args:
-            self.state.strategy = args[0]
-            if self.state.strategy in {"nec_x", "nec-x"}:
+            strategy = self._canonicalize_strategy_name(args[0])
+            self.state.strategy = strategy
+            self._ensure_strategy_params(strategy)
+            if strategy == "nec_x":
                 self.state.symbols = "SPY,QQQ"
                 self.state.bar_timeframe = "5Min"
                 self.state.slippage_bps = 1.25
+            self._render_settings()
+            return
+
+        if cmd in {"/param", "/params"}:
+            strategy = self._canonicalize_strategy_name(self.state.strategy)
+            self._ensure_strategy_params(strategy)
+            params = self.state.strategy_params.get(strategy, {})
+            if cmd == "/params" or not args:
+                rendered = self._format_strategy_params(strategy, params)
+                self._write_log(f"{strategy} params: {rendered}")
+                return
+            if len(args) != 2:
+                self._write_log("param usage: /param <key> <value>")
+                return
+            key = self._normalize_param_key(strategy, args[0])
+            spec = self._strategy_param_spec(strategy)
+            if spec and key not in spec:
+                valid = ", ".join(spec.keys())
+                self._write_log(f"unknown param for {strategy}: {args[0]} (valid: {valid})")
+                return
+            try:
+                value = self._parse_param_value(strategy, key, args[1])
+            except ValueError:
+                self._write_log(f"invalid value for {key}")
+                return
+            params[key] = value
+            if strategy == "ma_crossover":
+                if key == "fast_window":
+                    self.state.fast_window = int(value)
+                if key == "slow_window":
+                    self.state.slow_window = int(value)
             self._render_settings()
             return
 
@@ -772,6 +947,8 @@ class AtlasTui(App):
             except Exception as exc:
                 self._write_log(f"failed to load config ({path}): {exc}")
                 return
+            self.state.strategy = self._canonicalize_strategy_name(self.state.strategy)
+            self._ensure_strategy_params(self.state.strategy)
             self._autosave_enabled = True
             self._config_load_failed = False
             self._render_settings()
@@ -787,6 +964,8 @@ class AtlasTui(App):
         log_widget.write_line(message)
 
     def _render_settings(self) -> None:
+        self.state.strategy = self._canonicalize_strategy_name(self.state.strategy)
+        self._ensure_strategy_params(self.state.strategy)
         table = Table(title="Settings", show_header=False)
         table.add_column("k", style="bold")
         table.add_column("v")
@@ -806,6 +985,12 @@ class AtlasTui(App):
                 else self.state.strategy
             ),
         )
+        params = self.state.strategy_params.get(self.state.strategy, {})
+        if params:
+            table.add_row(
+                "params",
+                self._format_strategy_params(self.state.strategy, params),
+            )
         table.add_row("initial_cash", f"{self.state.initial_cash:.2f}")
         table.add_row("max_notional", f"{self.state.max_position_notional_usd:.2f}")
         table.add_row("slippage_bps", f"{self.state.slippage_bps:.2f}")
@@ -1070,6 +1255,7 @@ class AtlasTui(App):
             symbols=symbols,
             fast_window=self.state.fast_window,
             slow_window=self.state.slow_window,
+            params=self.state.strategy_params.get(self.state.strategy),
         )
 
         cfg = BacktestConfig(
@@ -1172,6 +1358,7 @@ class AtlasTui(App):
             symbols=[s.strip().upper() for s in self.state.symbols.split(",") if s.strip()],
             fast_window=self.state.fast_window,
             slow_window=self.state.slow_window,
+            params=self.state.strategy_params.get(self.state.strategy),
         )
         cfg = PaperConfig(
             symbols=[s.strip().upper() for s in self.state.symbols.split(",") if s.strip()],
