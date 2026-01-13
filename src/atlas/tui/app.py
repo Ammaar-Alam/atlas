@@ -2400,7 +2400,10 @@ class AtlasTui(App):
         if not tuned:
             self._write_log(f"no tuned params available for {strategy} (run /tune first)")
             return
-        self.state.strategy_params[strategy] = dict(tuned)
+        self._ensure_strategy_params(strategy)
+        merged = dict(self.state.strategy_params.get(strategy, {}))
+        merged.update(dict(tuned))
+        self.state.strategy_params[strategy] = merged
         self._ensure_strategy_params(strategy)
         self._render_settings()
         self._write_log(f"applied tuned params to {strategy}")

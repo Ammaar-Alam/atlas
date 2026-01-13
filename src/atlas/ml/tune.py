@@ -117,9 +117,6 @@ def _perp_flare_space() -> list[Param]:
         IntRange("er_window", 5, 80, log=True),
         IntRange("breakout_window", 8, 160, log=True),
         FloatRange("er_min", 0.15, 0.85, decimals=3),
-        FloatRange("taker_fee_bps", 0.0, 10.0, decimals=3),
-        FloatRange("half_spread_bps", 0.25, 8.0, decimals=3),
-        FloatRange("base_slippage_bps", 0.25, 10.0, decimals=3),
         FloatRange("edge_floor_bps", 0.0, 30.0, decimals=3),
         FloatRange("k_cost", 0.25, 8.0, decimals=3),
         FloatRange("risk_per_trade", 0.002, 0.25, log=True, decimals=6),
@@ -642,6 +639,7 @@ def tune_walk_forward(
     rng = random.Random(int(tune_cfg.seed))
 
     selections: list[SegmentSelection] = []
+    fixed_params = dict(base_params or {})
     incumbent = dict(base_params or {})
 
     t0 = time.perf_counter()
@@ -661,13 +659,15 @@ def tune_walk_forward(
                 seg_tmp = run_dir / "tmp" / f"seg{seg_i}_incumbent_val"
                 seg_tmp.mkdir(parents=True, exist_ok=True)
                 try:
+                    incumbent_params = dict(fixed_params)
+                    incumbent_params.update(incumbent)
                     val_bars = _slice_bars(bars_by_symbol, start=seg.validate.start, end=seg.validate.end)
                     _run_backtest_for_market(
                         market=market_enum,
                         bars_by_symbol=val_bars,
                         strategy_name=strategy,
                         symbols=symbols,
-                        params=incumbent,
+                        params=incumbent_params,
                         cfg=backtest_cfg,
                         run_dir=seg_tmp,
                     )
@@ -687,6 +687,8 @@ def tune_walk_forward(
                     incumbent=incumbent if incumbent else None,
                     drift_frac=tune_cfg.drift_frac,
                 )
+                full_params = dict(fixed_params)
+                full_params.update(params)
 
                 train_dir = run_dir / "tmp" / f"seg{seg_i}_trial{trial_i}_train"
                 val_dir = run_dir / "tmp" / f"seg{seg_i}_trial{trial_i}_val"
@@ -700,7 +702,7 @@ def tune_walk_forward(
                         bars_by_symbol=train_bars,
                         strategy_name=strategy,
                         symbols=symbols,
-                        params=params,
+                        params=full_params,
                         cfg=backtest_cfg,
                         run_dir=train_dir,
                     )
@@ -712,7 +714,7 @@ def tune_walk_forward(
                         bars_by_symbol=val_bars,
                         strategy_name=strategy,
                         symbols=symbols,
-                        params=params,
+                        params=full_params,
                         cfg=backtest_cfg,
                         run_dir=val_dir,
                     )
@@ -727,7 +729,7 @@ def tune_walk_forward(
                         segment=int(seg_i),
                         trial=int(trial_i),
                         phase="train",
-                        params=dict(params),
+                        params=dict(full_params),
                         score=float(train_score.score),
                         rejected=bool(train_score.rejected),
                         reject_reason=str(train_score.reason or ""),
@@ -739,7 +741,7 @@ def tune_walk_forward(
                         segment=int(seg_i),
                         trial=int(trial_i),
                         phase="validate",
-                        params=dict(params),
+                        params=dict(full_params),
                         score=float(val_score.score),
                         rejected=bool(val_score.rejected),
                         reject_reason=str(val_score.reason or ""),
@@ -752,7 +754,7 @@ def tune_walk_forward(
                     rejected = bool(train_score.rejected or val_score.rejected)
                     if not rejected and float(selection_score) > float(best_selection_score):
                         best_selection_score = float(selection_score)
-                        best_params = dict(params)
+                        best_params = dict(full_params)
                         best_train = {
                             "score": float(train_score.score),
                             "stats": asdict(train_score.stats),
@@ -784,13 +786,15 @@ def tune_walk_forward(
                     shutil.rmtree(val_dir, ignore_errors=True)
 
             # If we didn't find a feasible set, fall back to incumbent (or defaults).
-            chosen_params = dict(best_params or incumbent or {})
+            incumbent_params = dict(fixed_params)
+            incumbent_params.update(incumbent)
+            chosen_params = dict(best_params or incumbent_params or fixed_params or {})
             chosen_score = float(best_selection_score)
 
-            if chosen_params and incumbent:
+            if chosen_params and incumbent_params:
                 # Enforce improvement margin vs incumbent (optional).
                 if float(chosen_score) < float(incumbent_selection_score) + float(tune_cfg.improvement_margin):
-                    chosen_params = dict(incumbent)
+                    chosen_params = dict(incumbent_params)
                     chosen_score = float(incumbent_selection_score)
 
             # Evaluate out-of-sample on the test window and keep the run outputs.
