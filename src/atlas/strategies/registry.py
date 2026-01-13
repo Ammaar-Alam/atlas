@@ -7,9 +7,12 @@ from typing import Any, Dict, Optional
 import json
 
 from atlas.strategies.base import Strategy
+from atlas.strategies.ema_crossover import EmaCrossover
 from atlas.strategies.ma_crossover import MovingAverageCrossover
+from atlas.strategies.no_trade import NoTrade
 from atlas.strategies.nec_pdt import NecPDT
 from atlas.strategies.nec_x import NecX
+from atlas.strategies.spy_open_close import SpyOpenClose
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,20 @@ def build_strategy(
         slow = int(params.get("slow_window", slow_window))
         symbol = str(params.get("symbol") or (symbols[0] if symbols else "SPY"))
         return MovingAverageCrossover(fast_window=fast, slow_window=slow, symbol=symbol)
+
+    if name in {"ema_crossover", "ema-crossover"}:
+        fast = int(params.get("fast_window", fast_window))
+        slow = int(params.get("slow_window", slow_window))
+        symbol = str(params.get("symbol") or (symbols[0] if symbols else "SPY"))
+        return EmaCrossover(fast_window=fast, slow_window=slow, symbol=symbol)
+
+    if name in {"spy_open_close", "spy-open-close"}:
+        if "SPY" not in {s.upper() for s in symbols}:
+            raise ValueError("spy_open_close requires --symbols SPY")
+        return SpyOpenClose()
+
+    if name in {"no_trade", "no-trade"}:
+        return NoTrade()
 
     if name in {"nec_x", "nec-x"}:
         required = {"SPY", "QQQ"}
@@ -114,4 +131,11 @@ def build_strategy(
 
 
 def list_strategy_names() -> list[str]:
-    return ["ma_crossover", "nec_x", "nec_pdt"]
+    return [
+        "spy_open_close",
+        "no_trade",
+        "ema_crossover",
+        "ma_crossover",
+        "nec_x",
+        "nec_pdt",
+    ]

@@ -205,12 +205,12 @@ def backtest(
         "delayed_sip",
         help="When data-source=alpaca: iex, sip, delayed_sip (alias: uses sip but clamps end >=15m old).",
     ),
-    strategy: str = typer.Option("ma_crossover", help="Strategy name"),
+    strategy: str = typer.Option("spy_open_close", help="Strategy name"),
     strategy_params: Optional[Path] = typer.Option(
         None, help="JSON file with strategy parameters"
     ),
-    fast_window: int = typer.Option(10, help="ma_crossover fast window"),
-    slow_window: int = typer.Option(30, help="ma_crossover slow window"),
+    fast_window: int = typer.Option(10, help="ma_crossover/ema_crossover fast window"),
+    slow_window: int = typer.Option(30, help="ma_crossover/ema_crossover slow window"),
     initial_cash: float = typer.Option(100_000.0, help="Starting cash"),
     max_position_notional_usd: Optional[float] = typer.Option(
         None, help="Max notional per symbol"
@@ -295,7 +295,7 @@ def backtest(
 
     if strategy_params is not None:
         strategy_params_hint = f"params={strategy_params}"
-    elif strategy == "ma_crossover":
+    elif strategy in {"ma_crossover", "ema_crossover"}:
         strategy_params_hint = f"fast={fast_window} slow={slow_window}"
     else:
         strategy_params_hint = "defaults"
@@ -321,12 +321,12 @@ def paper(
         "iex",
         help="Alpaca data feed for bars: iex, sip, delayed_sip (alias: uses sip but clamps end >=15m old).",
     ),
-    strategy: str = typer.Option("ma_crossover", help="Strategy name"),
+    strategy: str = typer.Option("spy_open_close", help="Strategy name"),
     strategy_params: Optional[Path] = typer.Option(
         None, help="JSON file with strategy parameters"
     ),
-    fast_window: int = typer.Option(10, help="ma_crossover fast window"),
-    slow_window: int = typer.Option(30, help="ma_crossover slow window"),
+    fast_window: int = typer.Option(10, help="ma_crossover/ema_crossover fast window"),
+    slow_window: int = typer.Option(30, help="ma_crossover/ema_crossover slow window"),
     lookback_bars: int = typer.Option(200, help="Bars fetched each loop"),
     poll_seconds: int = typer.Option(60, help="Minimum seconds between loops"),
     max_position_notional_usd: Optional[float] = typer.Option(

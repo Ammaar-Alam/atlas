@@ -37,7 +37,7 @@ class TuiState:
     bar_timeframe: str = "1Min"
     alpaca_feed: str = "delayed_sip"
     paper_feed: str = "iex"
-    strategy: str = "ma_crossover"
+    strategy: str = "spy_open_close"
     fast_window: int = 10
     slow_window: int = 30
     strategy_params: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -64,6 +64,12 @@ class TuiState:
 
 
 STRATEGY_PARAM_SPECS: dict[str, dict[str, type]] = {
+    "spy_open_close": {},
+    "no_trade": {},
+    "ema_crossover": {
+        "fast_window": int,
+        "slow_window": int,
+    },
     "ma_crossover": {
         "fast_window": int,
         "slow_window": int,
@@ -102,6 +108,12 @@ STRATEGY_PARAM_SPECS: dict[str, dict[str, type]] = {
 }
 
 STRATEGY_DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
+    "spy_open_close": {},
+    "no_trade": {},
+    "ema_crossover": {
+        "fast_window": 10,
+        "slow_window": 30,
+    },
     "ma_crossover": {
         "fast_window": 10,
         "slow_window": 30,
@@ -327,26 +339,40 @@ class AtlasTui(App):
 
     def _canonicalize_strategy_name(self, name: str) -> str:
         name = name.strip()
-        if name == "nec-x":
-            return "nec_x"
-        if name == "nec-pdt":
-            return "nec_pdt"
+        alias_map = {
+            "nec-x": "nec_x",
+            "nec-pdt": "nec_pdt",
+            "ema-crossover": "ema_crossover",
+            "spy-open-close": "spy_open_close",
+            "no-trade": "no_trade",
+        }
+        if name in alias_map:
+            return alias_map[name]
         return name
 
     def _strategy_param_spec(self, strategy: str) -> dict[str, type]:
         return STRATEGY_PARAM_SPECS.get(strategy, {})
 
     def _ensure_strategy_params(self, strategy: str) -> None:
-        alias_map = {"nec_x": "nec-x", "nec_pdt": "nec-pdt"}
+        alias_map = {
+            "nec_x": "nec-x",
+            "nec_pdt": "nec-pdt",
+            "ema_crossover": "ema-crossover",
+            "spy_open_close": "spy-open-close",
+            "no_trade": "no-trade",
+        }
         alias = alias_map.get(strategy)
         if alias and alias in self.state.strategy_params and strategy not in self.state.strategy_params:
             self.state.strategy_params[strategy] = self.state.strategy_params.pop(alias)
 
         if strategy == "ma_crossover":
-            defaults = {
-                "fast_window": self.state.fast_window,
-                "slow_window": self.state.slow_window,
-            }
+            if not self.state.strategy_params:
+                defaults = {
+                    "fast_window": self.state.fast_window,
+                    "slow_window": self.state.slow_window,
+                }
+            else:
+                defaults = STRATEGY_DEFAULT_PARAMS.get(strategy, {})
         else:
             defaults = STRATEGY_DEFAULT_PARAMS.get(strategy, {})
 
@@ -357,7 +383,7 @@ class AtlasTui(App):
             for key, value in defaults.items():
                 params.setdefault(key, value)
 
-        if strategy == "ma_crossover":
+        if strategy in {"ma_crossover", "ema_crossover"}:
             params = self.state.strategy_params.get(strategy, {})
             if "fast_window" in params:
                 self.state.fast_window = int(params["fast_window"])
@@ -719,9 +745,12 @@ class AtlasTui(App):
             if value <= 0:
                 self._write_log("fast must be > 0")
                 return
-            self._ensure_strategy_params("ma_crossover")
-            self.state.fast_window = value
-            self.state.strategy_params["ma_crossover"]["fast_window"] = value
+            active = self._canonicalize_strategy_name(self.state.strategy)
+            target = "ema_crossover" if active == "ema_crossover" else "ma_crossover"
+            self._ensure_strategy_params(target)
+            if active in {"ma_crossover", "ema_crossover"}:
+                self.state.fast_window = value
+            self.state.strategy_params[target]["fast_window"] = value
             self._render_settings()
             return
 
@@ -734,9 +763,12 @@ class AtlasTui(App):
             if value <= 0:
                 self._write_log("slow must be > 0")
                 return
-            self._ensure_strategy_params("ma_crossover")
-            self.state.slow_window = value
-            self.state.strategy_params["ma_crossover"]["slow_window"] = value
+            active = self._canonicalize_strategy_name(self.state.strategy)
+            target = "ema_crossover" if active == "ema_crossover" else "ma_crossover"
+            self._ensure_strategy_params(target)
+            if active in {"ma_crossover", "ema_crossover"}:
+                self.state.slow_window = value
+            self.state.strategy_params[target]["slow_window"] = value
             self._render_settings()
             return
 
@@ -915,6 +947,8 @@ class AtlasTui(App):
                 self.state.symbols = "SPY,QQQ"
                 self.state.bar_timeframe = "5Min"
                 self.state.slippage_bps = 1.25 if strategy == "nec_x" else 3.8
+            elif strategy == "spy_open_close":
+                self.state.symbols = "SPY"
             self._render_settings()
             return
 
@@ -931,6 +965,9 @@ class AtlasTui(App):
                 return
             key = self._normalize_param_key(strategy, args[0])
             spec = self._strategy_param_spec(strategy)
+            if strategy in STRATEGY_PARAM_SPECS and not spec:
+                self._write_log(f"{strategy} has no editable params")
+                return
             if spec and key not in spec:
                 valid = ", ".join(spec.keys())
                 self._write_log(f"unknown param for {strategy}: {args[0]} (valid: {valid})")
@@ -941,7 +978,7 @@ class AtlasTui(App):
                 self._write_log(f"invalid value for {key}")
                 return
             params[key] = value
-            if strategy == "ma_crossover":
+            if strategy in {"ma_crossover", "ema_crossover"}:
                 if key == "fast_window":
                     self.state.fast_window = int(value)
                 if key == "slow_window":
@@ -1022,7 +1059,7 @@ class AtlasTui(App):
             "strategy",
             (
                 f"{self.state.strategy} (fast={self.state.fast_window} slow={self.state.slow_window})"
-                if self.state.strategy == "ma_crossover"
+                if self.state.strategy in {"ma_crossover", "ema_crossover"}
                 else self.state.strategy
             ),
         )
@@ -1335,7 +1372,7 @@ class AtlasTui(App):
             "strategy",
             (
                 f"{self.state.strategy} (fast={self.state.fast_window} slow={self.state.slow_window})"
-                if self.state.strategy == "ma_crossover"
+                if self.state.strategy in {"ma_crossover", "ema_crossover"}
                 else self.state.strategy
             ),
         )
