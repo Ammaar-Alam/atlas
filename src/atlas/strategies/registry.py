@@ -12,6 +12,7 @@ from atlas.strategies.ma_crossover import MovingAverageCrossover
 from atlas.strategies.no_trade import NoTrade
 from atlas.strategies.nec_pdt import NecPDT
 from atlas.strategies.nec_x import NecX
+from atlas.strategies.orb_trend import OrbTrend
 from atlas.strategies.spy_open_close import SpyOpenClose
 
 
@@ -42,6 +43,16 @@ def build_strategy(
     params: Optional[Dict[str, Any]] = None,
 ) -> Strategy:
     params = params if params is not None else _load_params(params_path)
+    if isinstance(params, dict):
+        if "params" in params and isinstance(params["params"], dict):
+            params = params["params"]
+        elif "parameters" in params and isinstance(params["parameters"], dict):
+            params = params["parameters"]
+        canonical = name.replace("-", "_")
+        if canonical in params and isinstance(params[canonical], dict):
+            params = params[canonical]
+        elif name in params and isinstance(params[name], dict):
+            params = params[name]
 
     if name == "ma_crossover":
         fast = int(params.get("fast_window", fast_window))
@@ -127,6 +138,34 @@ def build_strategy(
             ),
         )
 
+    if name in {"orb_trend", "orb-trend"}:
+        required = {"SPY", "QQQ"}
+        if not required.issubset({s.upper() for s in symbols}):
+            raise ValueError("orb_trend requires --symbols SPY,QQQ")
+
+        def _get_int(key: str, default: int) -> int:
+            raw = params.get(key, params.get(key.lower(), default))
+            return int(raw)
+
+        def _get_float(key: str, default: float) -> float:
+            raw = params.get(key, params.get(key.lower(), default))
+            return float(raw)
+
+        return OrbTrend(
+            orb_minutes=_get_int("orb_minutes", 30),
+            orb_breakout_bps=_get_float("orb_breakout_bps", 4.0),
+            confirm_bars=_get_int("confirm_bars", 2),
+            atr_window=_get_int("atr_window", 20),
+            er_window=_get_int("er_window", 12),
+            er_min=_get_float("er_min", 0.35),
+            expected_hold_bars=_get_int("expected_hold_bars", 12),
+            k_cost=_get_float("k_cost", 2.0),
+            slippage_bps=_get_float("slippage_bps", 1.25),
+            min_hold_bars=_get_int("min_hold_bars", 3),
+            daily_loss_limit=_get_float("daily_loss_limit", 0.010),
+            kill_switch=_get_float("kill_switch", 0.025),
+        )
+
     raise ValueError(f"unknown strategy: {name}")
 
 
@@ -138,4 +177,5 @@ def list_strategy_names() -> list[str]:
         "ma_crossover",
         "nec_x",
         "nec_pdt",
+        "orb_trend",
     ]

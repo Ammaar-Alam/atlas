@@ -217,7 +217,7 @@ def backtest(
     ),
     slippage_bps: Optional[float] = typer.Option(
         None,
-        help="Fill cost per side in basis points (slippage/spread proxy). If omitted, nec_x defaults to 1.25 bps/side.",
+        help="Fill cost per side in basis points (slippage/spread proxy). If omitted, nec_x/orb_trend default to 1.25 bps/side and nec_pdt defaults to 3.8 bps/side.",
     ),
     allow_short: bool = typer.Option(False, help="Allow negative exposure"),
 ) -> None:
@@ -270,7 +270,7 @@ def backtest(
         slippage_bps=float(
             (
                 1.25
-                if strategy in {"nec_x", "nec-x"}
+                if strategy in {"nec_x", "nec-x", "orb_trend", "orb-trend"}
                 else 3.8
                 if strategy in {"nec_pdt", "nec-pdt"}
                 else 0.0

@@ -105,6 +105,20 @@ STRATEGY_PARAM_SPECS: dict[str, dict[str, type]] = {
         "slippage_bps": float,
         "fee_bps": float,
     },
+    "orb_trend": {
+        "orb_minutes": int,
+        "orb_breakout_bps": float,
+        "confirm_bars": int,
+        "atr_window": int,
+        "er_window": int,
+        "er_min": float,
+        "expected_hold_bars": int,
+        "k_cost": float,
+        "slippage_bps": float,
+        "min_hold_bars": int,
+        "daily_loss_limit": float,
+        "kill_switch": float,
+    },
 }
 
 STRATEGY_DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
@@ -148,6 +162,20 @@ STRATEGY_DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
         "half_spread_bps": 1.5,
         "slippage_bps": 2.0,
         "fee_bps": 0.3,
+    },
+    "orb_trend": {
+        "orb_minutes": 30,
+        "orb_breakout_bps": 4.0,
+        "confirm_bars": 2,
+        "atr_window": 20,
+        "er_window": 12,
+        "er_min": 0.35,
+        "expected_hold_bars": 12,
+        "k_cost": 2.0,
+        "slippage_bps": 1.25,
+        "min_hold_bars": 3,
+        "daily_loss_limit": 0.010,
+        "kill_switch": 0.025,
     },
 }
 
@@ -342,6 +370,7 @@ class AtlasTui(App):
         alias_map = {
             "nec-x": "nec_x",
             "nec-pdt": "nec_pdt",
+            "orb-trend": "orb_trend",
             "ema-crossover": "ema_crossover",
             "spy-open-close": "spy_open_close",
             "no-trade": "no_trade",
@@ -357,6 +386,7 @@ class AtlasTui(App):
         alias_map = {
             "nec_x": "nec-x",
             "nec_pdt": "nec-pdt",
+            "orb_trend": "orb-trend",
             "ema_crossover": "ema-crossover",
             "spy_open_close": "spy-open-close",
             "no_trade": "no-trade",
@@ -808,6 +838,18 @@ class AtlasTui(App):
                 self._write_log("slippage must be >= 0")
                 return
             self.state.slippage_bps = value
+            strategy = self._canonicalize_strategy_name(self.state.strategy)
+            if strategy == "orb_trend":
+                self._ensure_strategy_params(strategy)
+                self.state.strategy_params[strategy]["slippage_bps"] = float(value)
+            elif strategy == "nec_x":
+                self._write_log(
+                    "note: for nec_x, slippage is derived from spread_floor_bps + slip_bps (edit via /param to keep gating consistent)"
+                )
+            elif strategy == "nec_pdt":
+                self._write_log(
+                    "note: for nec_pdt, slippage is derived from half_spread_bps + slippage_bps + fee_bps (edit via /param to keep gating consistent)"
+                )
             self._render_settings()
             return
 
@@ -943,10 +985,20 @@ class AtlasTui(App):
             strategy = self._canonicalize_strategy_name(args[0])
             self.state.strategy = strategy
             self._ensure_strategy_params(strategy)
-            if strategy in {"nec_x", "nec_pdt"}:
+            if strategy in {"nec_x", "nec_pdt", "orb_trend"}:
                 self.state.symbols = "SPY,QQQ"
                 self.state.bar_timeframe = "5Min"
-                self.state.slippage_bps = 1.25 if strategy == "nec_x" else 3.8
+                params = self.state.strategy_params.get(strategy, {})
+                if strategy == "nec_x":
+                    self.state.slippage_bps = float(params.get("spread_floor_bps", 0.0)) + float(
+                        params.get("slip_bps", 0.0)
+                    )
+                elif strategy == "nec_pdt":
+                    self.state.slippage_bps = float(params.get("half_spread_bps", 0.0)) + float(
+                        params.get("slippage_bps", 0.0)
+                    ) + float(params.get("fee_bps", 0.0))
+                else:
+                    self.state.slippage_bps = float(params.get("slippage_bps", 1.25))
             elif strategy == "spy_open_close":
                 self.state.symbols = "SPY"
             self._render_settings()
@@ -983,6 +1035,16 @@ class AtlasTui(App):
                     self.state.fast_window = int(value)
                 if key == "slow_window":
                     self.state.slow_window = int(value)
+            if strategy == "orb_trend" and key == "slippage_bps":
+                self.state.slippage_bps = float(value)
+            if strategy == "nec_x" and key in {"spread_floor_bps", "slip_bps"}:
+                self.state.slippage_bps = float(params.get("spread_floor_bps", 0.0)) + float(
+                    params.get("slip_bps", 0.0)
+                )
+            if strategy == "nec_pdt" and key in {"half_spread_bps", "slippage_bps", "fee_bps"}:
+                self.state.slippage_bps = float(params.get("half_spread_bps", 0.0)) + float(
+                    params.get("slippage_bps", 0.0)
+                ) + float(params.get("fee_bps", 0.0))
             self._render_settings()
             return
 
