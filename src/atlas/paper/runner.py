@@ -106,6 +106,10 @@ def _fetch_recent_bars(
     tf = parse_bar_timeframe(timeframe)
     end = now_ny()
     start = end - timedelta(minutes=max(lookback_bars * tf.minutes * 2, 10))
+    empty = pd.DataFrame(
+        columns=["open", "high", "low", "close", "volume"],
+        index=pd.MultiIndex.from_arrays([[], []], names=["symbol", "timestamp"]),
+    )
 
     if market == Market.CRYPTO:
         client = _make_crypto_bars_client(settings)
@@ -116,6 +120,8 @@ def _fetch_recent_bars(
             end=_to_utc(pd.Timestamp(end)),
         )
         res = client.get_crypto_bars(req).df
+        if res is None or len(res) == 0:
+            return empty
     else:
         client = _stock_bars_client(settings)
         feed_cfg = parse_alpaca_feed(feed)
@@ -126,10 +132,11 @@ def _fetch_recent_bars(
             timeframe=TimeFrame(amount=tf.minutes, unit=TimeFrameUnit.Minute),
             start=start,
             end=end,
-            limit=max(lookback_bars, 10),
             feed=feed_cfg.api_feed,
         )
         res = client.get_stock_bars(req).df
+        if res is None or len(res) == 0:
+            return empty
 
     res = _normalize_bars_index_to_ny(res)
     res = res.sort_index()
@@ -302,7 +309,21 @@ def run_paper_loop(
                 raise RuntimeError("expected multi-index bars response from alpaca")
 
             bars_by_symbol: dict[str, pd.DataFrame] = {}
+            symbols_present = set(bars_df.index.get_level_values(0).unique())
             for symbol in cfg_symbols:
+                if symbol not in symbols_present:
+                    logger.warning(
+                        "alpaca returned no bars for %s (market=%s feed=%s)",
+                        symbol,
+                        mkt.value,
+                        cfg.alpaca_feed,
+                    )
+                    bars_by_symbol[symbol] = pd.DataFrame(
+                        columns=["open", "high", "low", "close", "volume"],
+                        index=pd.DatetimeIndex([], tz=NY_TZ),
+                    )
+                    continue
+
                 df = bars_df.xs(symbol)
                 df = df[["open", "high", "low", "close", "volume"]].copy()
                 df = df.sort_index()
