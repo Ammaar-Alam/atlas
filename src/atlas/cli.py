@@ -268,7 +268,13 @@ def backtest(
         initial_cash=initial_cash,
         max_position_notional_usd=float(max_position_notional_usd),
         slippage_bps=float(
-            (1.25 if strategy in {"nec_x", "nec-x"} else 0.0)
+            (
+                1.25
+                if strategy in {"nec_x", "nec-x"}
+                else 3.8
+                if strategy in {"nec_pdt", "nec-pdt"}
+                else 0.0
+            )
             if slippage_bps is None
             else slippage_bps
         ),

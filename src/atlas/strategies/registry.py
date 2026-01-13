@@ -8,6 +8,7 @@ import json
 
 from atlas.strategies.base import Strategy
 from atlas.strategies.ma_crossover import MovingAverageCrossover
+from atlas.strategies.nec_pdt import NecPDT
 from atlas.strategies.nec_x import NecX
 
 
@@ -74,8 +75,43 @@ def build_strategy(
             tick_size=_get_float("tick_size", 0.01),
         )
 
+    if name in {"nec_pdt", "nec-pdt"}:
+        required = {"SPY", "QQQ"}
+        if not required.issubset({s.upper() for s in symbols}):
+            raise ValueError("nec_pdt requires --symbols SPY,QQQ")
+
+        def _get_int(key: str, default: int) -> int:
+            raw = params.get(key, params.get(key.lower(), default))
+            return int(raw)
+
+        def _get_float(key: str, default: float) -> float:
+            raw = params.get(key, params.get(key.lower(), default))
+            return float(raw)
+
+        return NecPDT(
+            M=_get_int("M", 6),
+            V=_get_int("V", 12),
+            eps=_get_float("eps", 1e-8),
+            H=_get_int("H", 12),
+            base_thr_bps=_get_float("base_thr_bps", 10.0),
+            budget_step_bps=_get_float("budget_step_bps", 4.0),
+            atr_lookback_bars=_get_int("atr_lookback_bars", 12),
+            stop_atr_mult=_get_float("stop_atr_mult", 2.0),
+            trail_atr_mult=_get_float("trail_atr_mult", 2.5),
+            min_hold_bars=_get_int("min_hold_bars", 4),
+            flip_confirm_bars=_get_int("flip_confirm_bars", 3),
+            max_day_trades_per_rolling_5_days=_get_int(
+                "max_day_trades_per_rolling_5_days", 3
+            ),
+            half_spread_bps=_get_float("half_spread_bps", 1.5),
+            slippage_bps=_get_float("slippage_bps", 2.0),
+            fee_bps=float(
+                params.get("fee_bps", params.get("fees_bps", _get_float("fee_bps", 0.3)))
+            ),
+        )
+
     raise ValueError(f"unknown strategy: {name}")
 
 
 def list_strategy_names() -> list[str]:
-    return ["ma_crossover", "nec_x"]
+    return ["ma_crossover", "nec_x", "nec_pdt"]

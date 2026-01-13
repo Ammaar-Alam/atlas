@@ -82,6 +82,23 @@ STRATEGY_PARAM_SPECS: dict[str, dict[str, type]] = {
         "daily_loss_limit": float,
         "kill_switch": float,
     },
+    "nec_pdt": {
+        "M": int,
+        "V": int,
+        "eps": float,
+        "H": int,
+        "base_thr_bps": float,
+        "budget_step_bps": float,
+        "atr_lookback_bars": int,
+        "stop_atr_mult": float,
+        "trail_atr_mult": float,
+        "min_hold_bars": int,
+        "flip_confirm_bars": int,
+        "max_day_trades_per_rolling_5_days": int,
+        "half_spread_bps": float,
+        "slippage_bps": float,
+        "fee_bps": float,
+    },
 }
 
 STRATEGY_DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
@@ -102,6 +119,23 @@ STRATEGY_DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
         "slip_bps": 0.75,
         "daily_loss_limit": 0.010,
         "kill_switch": 0.025,
+    },
+    "nec_pdt": {
+        "M": 6,
+        "V": 12,
+        "eps": 1e-8,
+        "H": 12,
+        "base_thr_bps": 10.0,
+        "budget_step_bps": 4.0,
+        "atr_lookback_bars": 12,
+        "stop_atr_mult": 2.0,
+        "trail_atr_mult": 2.5,
+        "min_hold_bars": 4,
+        "flip_confirm_bars": 3,
+        "max_day_trades_per_rolling_5_days": 3,
+        "half_spread_bps": 1.5,
+        "slippage_bps": 2.0,
+        "fee_bps": 0.3,
     },
 }
 
@@ -295,26 +329,33 @@ class AtlasTui(App):
         name = name.strip()
         if name == "nec-x":
             return "nec_x"
+        if name == "nec-pdt":
+            return "nec_pdt"
         return name
 
     def _strategy_param_spec(self, strategy: str) -> dict[str, type]:
         return STRATEGY_PARAM_SPECS.get(strategy, {})
 
     def _ensure_strategy_params(self, strategy: str) -> None:
-        alias_map = {"nec_x": "nec-x"}
+        alias_map = {"nec_x": "nec-x", "nec_pdt": "nec-pdt"}
         alias = alias_map.get(strategy)
         if alias and alias in self.state.strategy_params and strategy not in self.state.strategy_params:
             self.state.strategy_params[strategy] = self.state.strategy_params.pop(alias)
 
+        if strategy == "ma_crossover":
+            defaults = {
+                "fast_window": self.state.fast_window,
+                "slow_window": self.state.slow_window,
+            }
+        else:
+            defaults = STRATEGY_DEFAULT_PARAMS.get(strategy, {})
+
         if strategy not in self.state.strategy_params:
-            if strategy == "ma_crossover":
-                defaults = {
-                    "fast_window": self.state.fast_window,
-                    "slow_window": self.state.slow_window,
-                }
-            else:
-                defaults = STRATEGY_DEFAULT_PARAMS.get(strategy, {})
             self.state.strategy_params[strategy] = dict(defaults)
+        else:
+            params = self.state.strategy_params[strategy]
+            for key, value in defaults.items():
+                params.setdefault(key, value)
 
         if strategy == "ma_crossover":
             params = self.state.strategy_params.get(strategy, {})
@@ -870,10 +911,10 @@ class AtlasTui(App):
             strategy = self._canonicalize_strategy_name(args[0])
             self.state.strategy = strategy
             self._ensure_strategy_params(strategy)
-            if strategy == "nec_x":
+            if strategy in {"nec_x", "nec_pdt"}:
                 self.state.symbols = "SPY,QQQ"
                 self.state.bar_timeframe = "5Min"
-                self.state.slippage_bps = 1.25
+                self.state.slippage_bps = 1.25 if strategy == "nec_x" else 3.8
             self._render_settings()
             return
 
