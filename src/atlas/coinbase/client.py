@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import random
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -45,14 +47,75 @@ class CoinbaseClient:
     def _request_public(self, method: str, endpoint: str, params: Optional[dict] = None) -> Any:
         url = f"{self.ADVANCED_TRADE_API_URL}{endpoint}"
         headers = {"Accept": "application/json"}
-        try:
-            resp = self.session.request(method, url, headers=headers, params=params, timeout=30)
-            resp.raise_for_status()
-        except requests.HTTPError as exc:
-            body = getattr(exc.response, "text", "") if getattr(exc, "response", None) else ""
-            logger.error("Coinbase API error %s %s: %s", method, url, body)
-            raise
-        return resp.json()
+
+        retryable_statuses = {429, 500, 502, 503, 504}
+        last_response: Optional[requests.Response] = None
+        last_error: Optional[Exception] = None
+
+        max_attempts = 8
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = self.session.request(method, url, headers=headers, params=params, timeout=30)
+                last_response = resp
+
+                if resp.status_code in retryable_statuses:
+                    retry_after_s: Optional[float] = None
+                    retry_after = resp.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            retry_after_s = float(retry_after)
+                        except ValueError:
+                            retry_after_s = None
+
+                    base_s = 1.0 if resp.status_code == 429 else 0.5
+                    backoff_s = min(30.0, base_s * (2 ** (attempt - 1)))
+                    wait_s = max(backoff_s, retry_after_s or 0.0) + random.uniform(0.0, 0.25)
+                    logger.warning(
+                        "Coinbase API %s %s returned %s (attempt %d/%d); retrying in %.2fs",
+                        method,
+                        url,
+                        resp.status_code,
+                        attempt,
+                        max_attempts,
+                        wait_s,
+                    )
+                    time.sleep(wait_s)
+                    continue
+
+                resp.raise_for_status()
+                return resp.json()
+            except requests.HTTPError as exc:
+                body = getattr(exc.response, "text", "") if getattr(exc, "response", None) else ""
+                logger.error("Coinbase API error %s %s: %s", method, url, body)
+                raise
+            except requests.RequestException as exc:
+                last_error = exc
+                if attempt >= max_attempts:
+                    break
+                wait_s = min(30.0, 0.5 * (2 ** (attempt - 1))) + random.uniform(0.0, 0.25)
+                logger.warning(
+                    "Coinbase request error %s %s (attempt %d/%d): %s; retrying in %.2fs",
+                    method,
+                    url,
+                    attempt,
+                    max_attempts,
+                    exc,
+                    wait_s,
+                )
+                time.sleep(wait_s)
+
+        if last_response is not None:
+            try:
+                last_response.raise_for_status()
+            except requests.HTTPError as exc:
+                body = getattr(exc.response, "text", "") if getattr(exc, "response", None) else ""
+                logger.error("Coinbase API error %s %s: %s", method, url, body)
+                raise
+
+        if last_error is not None:
+            raise last_error
+
+        raise RuntimeError(f"Coinbase request failed: {method} {url}")
 
     def list_products(self, product_type: str = "FUTURE") -> list[Product]:
         """

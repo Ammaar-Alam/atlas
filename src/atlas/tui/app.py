@@ -24,11 +24,20 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Header, Input, Log, Static
 
+from atlas.backtest.derivatives_engine import run_derivatives_backtest
 from atlas.backtest.engine import BacktestConfig, BacktestProgress, run_backtest
 from atlas.config import get_alpaca_settings, get_default_max_position_notional_usd
 from atlas.data.bars import parse_bar_timeframe
 from atlas.data.universe import load_universe_bars
 from atlas.market import Market, coerce_symbols_for_market, default_symbols, parse_market
+from atlas.ml.tune import (
+    ObjectiveConfig,
+    TuneConfig,
+    TuneProgress,
+    WalkForwardConfig,
+    parse_duration_spec,
+    tune_walk_forward,
+)
 from atlas.paper.runner import PaperConfig, run_paper_loop
 from atlas.strategies.registry import build_strategy, list_strategy_names
 from atlas.utils.time import NY_TZ, now_ny, parse_iso_datetime
@@ -61,6 +70,16 @@ class TuiState:
     paper_allow_trading_when_closed: bool = False
     paper_limit_offset_bps: float = 5.0
     paper_dry_run: bool = False
+    tune_trials_per_segment: int = 60
+    tune_seed: int = 7
+    tune_train: str = "30d"
+    tune_validate: str = "7d"
+    tune_test: str = "7d"
+    tune_step: str = "7d"
+    tune_drift_frac: float = 0.50
+    tune_improvement_margin: float = 0.0
+    tune_last_run_dir: Optional[str] = None
+    tune_best_params: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, raw: dict) -> "TuiState":
@@ -317,6 +336,9 @@ class AtlasTui(App):
         "/perps": "/derivative",
         "/future": "/derivative",
         "/futures": "/derivative",
+        "/train": "/tune",
+        "/tuning": "/tune",
+        "/optimize": "/tune",
     }
     BASE_COMMANDS = [
         "/help",
@@ -326,6 +348,7 @@ class AtlasTui(App):
         "/crypto",
         "/derivative",
         "/backtest",
+        "/tune",
         "/paper",
         "/timeframe",
         "/bar",
@@ -403,6 +426,14 @@ class AtlasTui(App):
         self._paper_thread: Optional[Thread] = None
         self._paper_stop: Optional[Event] = None
         self._paper_run_dir: Optional[Path] = None
+        self._tune_thread: Optional[Thread] = None
+        self._tune_stop: Optional[Event] = None
+        self._tune_events: "queue.Queue[tuple[str, object]]" = queue.Queue()
+        self._tune_status: str = ""
+        self._tune_progress: Optional[TuneProgress] = None
+        self._tune_run_dir: Optional[Path] = None
+        self._tune_started_at: Optional[float] = None
+        self._tune_last_result_dir: Optional[Path] = None
         self._last_run_dir: Optional[Path] = None
         self._last_live_decision_ts: Optional[str] = None
         self._suggestion_matches: list[str] = []
@@ -616,9 +647,11 @@ class AtlasTui(App):
         if cmd == "/paperlimitbps":
             return ["0", "1", "5", "10", "25"]
         if cmd == "/bar":
-            return ["1Min", "5Min"]
+            return ["1Min", "5Min", "15Min", "30Min", "60Min", "4H"]
         if cmd == "/algorithm":
             return list_strategy_names()
+        if cmd == "/tune":
+            return ["start", "stop", "apply", "trials", "seed", "train", "validate", "test", "step", "drift", "margin"]
         if cmd == "/param":
             strategy = self._canonicalize_strategy_name(self.state.strategy)
             spec = self._strategy_param_spec(strategy)
@@ -736,6 +769,7 @@ class AtlasTui(App):
         self._render_results(None)
         self.set_interval(0.5, self._refresh_live_view)
         self.set_interval(0.2, self._refresh_backtest_view)
+        self.set_interval(0.2, self._refresh_tune_view)
 
     def on_unmount(self) -> None:
         self._save_config()
@@ -830,7 +864,8 @@ class AtlasTui(App):
         if cmd in {"/help", "/?"}:
             self._write_log(
                 "commands: /stock, /crypto, /backtest, /paper start|stop, /timeframe <7d|6h|1m|1y|clear>, "
-                "/bar <1Min|5Min>, /algorithm <name>, /data <sample|csv|alpaca>, "
+                "/bar <1Min|5Min|30Min|60Min|4H>, /algorithm <name>, /data <sample|csv|alpaca|coinbase>, "
+                "/tune start|stop|apply|trials|seed|train|validate|test|step|drift|margin, "
                 "/param <key> <value>, /params, "
                 "/fast <int>, /slow <int>, /cash <usd> (/initialcash <usd>), /maxnotional <usd>, /slippage <bps>, /short <true|false>, "
                 "/feed <iex|delayed_sip|sip>, /paperfeed <iex|delayed_sip|sip>, /csv <path>, "
@@ -883,6 +918,16 @@ class AtlasTui(App):
                 self._write_log("data source must be sample|csv|alpaca|coinbase")
                 return
             self.state.data_source = value
+            if self.state.timeframe and self.state.data_source in {"alpaca", "coinbase"}:
+                try:
+                    delta = _parse_relative_timeframe(self.state.timeframe)
+                except Exception:
+                    pass
+                else:
+                    end_dt = now_ny()
+                    start_dt = end_dt - delta
+                    self.state.start = start_dt.isoformat()
+                    self.state.end = end_dt.isoformat()
             self._render_settings()
             return
 
@@ -1104,7 +1149,7 @@ class AtlasTui(App):
                 self._write_log("unsupported timeframe spec (examples: 7d, 6h, 1m, 1y)")
                 return
             self.state.timeframe = args[0]
-            if self.state.data_source == "alpaca":
+            if self.state.data_source in {"alpaca", "coinbase"}:
                 end_dt = now_ny()
                 start_dt = end_dt - delta
                 self.state.start = start_dt.isoformat()
@@ -1213,6 +1258,80 @@ class AtlasTui(App):
                 self.state.slippage_bps = float(params.get("half_spread_bps", 0.0)) + float(
                     params.get("slippage_bps", 0.0)
                 ) + float(params.get("fee_bps", 0.0))
+            self._render_settings()
+            return
+
+        if cmd == "/tune":
+            action = args[0].lower() if args else "start"
+            if action in {"start"}:
+                self._start_tune()
+                return
+            if action == "stop":
+                self._stop_tune()
+                return
+            if action == "apply":
+                self._apply_tuned_params()
+                return
+
+            if len(args) != 2:
+                self._write_log(
+                    "tune usage: /tune start|stop|apply OR /tune trials|seed|train|validate|test|step|drift|margin <value>"
+                )
+                return
+
+            key = action
+            value_raw = args[1]
+            if key == "trials":
+                try:
+                    value = int(value_raw)
+                except ValueError:
+                    self._write_log("tune trials must be an integer")
+                    return
+                if value <= 0:
+                    self._write_log("tune trials must be > 0")
+                    return
+                self.state.tune_trials_per_segment = value
+            elif key == "seed":
+                try:
+                    self.state.tune_seed = int(value_raw)
+                except ValueError:
+                    self._write_log("tune seed must be an integer")
+                    return
+            elif key in {"train", "validate", "test", "step"}:
+                try:
+                    _ = parse_duration_spec(value_raw)
+                except Exception:
+                    self._write_log("tune window must be like 30d/6h/1y")
+                    return
+                if key == "train":
+                    self.state.tune_train = value_raw
+                elif key == "validate":
+                    self.state.tune_validate = value_raw
+                elif key == "test":
+                    self.state.tune_test = value_raw
+                else:
+                    self.state.tune_step = value_raw
+            elif key == "drift":
+                try:
+                    value = float(value_raw)
+                except ValueError:
+                    self._write_log("tune drift must be a number")
+                    return
+                if value < 0:
+                    self._write_log("tune drift must be >= 0")
+                    return
+                self.state.tune_drift_frac = float(value)
+            elif key == "margin":
+                try:
+                    value = float(value_raw)
+                except ValueError:
+                    self._write_log("tune margin must be a number")
+                    return
+                self.state.tune_improvement_margin = float(value)
+            else:
+                self._write_log("unknown tune setting (use: trials, seed, train, validate, test, step, drift, margin)")
+                return
+
             self._render_settings()
             return
 
@@ -1331,6 +1450,26 @@ class AtlasTui(App):
         table.add_row("paper_when_closed", str(self.state.paper_allow_trading_when_closed))
         table.add_row("paper_limit_bps", f"{self.state.paper_limit_offset_bps:.2f}")
         table.add_row("paper_dry_run", str(self.state.paper_dry_run))
+
+        _section("Tune")
+        table.add_row(
+            "tune_running",
+            Text("true", style="green") if (self._tune_thread is not None) else Text("false", style="red"),
+        )
+        table.add_row("tune_trials", str(self.state.tune_trials_per_segment))
+        table.add_row("tune_seed", str(self.state.tune_seed))
+        table.add_row(
+            "tune_windows",
+            f"train={self.state.tune_train} val={self.state.tune_validate} test={self.state.tune_test} step={self.state.tune_step}",
+        )
+        table.add_row("tune_drift", f"{float(self.state.tune_drift_frac):.2f}")
+        table.add_row("tune_margin", f"{float(self.state.tune_improvement_margin):.4g}")
+        table.add_row("tune_last_run", self.state.tune_last_run_dir or "-")
+        best_for_strategy = self.state.tune_best_params.get(self.state.strategy)
+        table.add_row(
+            "tune_best",
+            Text("available", style="green") if best_for_strategy else Text("none", style="red"),
+        )
 
         _section("Config")
         table.add_row("config", str(self._config_path))
@@ -1957,6 +2096,315 @@ class AtlasTui(App):
         if updated:
             self._render_backtest_live()
 
+    def _render_tune_live(self) -> None:
+        results = self.query_one("#results", Static)
+        results.border_title = "Tune (live)"
+
+        table = Table(show_header=False, box=box.SIMPLE)
+        table.add_column("k", style="bold")
+        table.add_column("v")
+
+        table.add_row("run_dir", str(self._tune_run_dir) if self._tune_run_dir else "-")
+        table.add_row("status", self._tune_status or "-")
+
+        progress = self._tune_progress
+        if progress is not None:
+            table.add_row(
+                "segment",
+                f"{int(progress.segment) + 1}/{int(progress.n_segments)}",
+            )
+            table.add_row(
+                "trial",
+                f"{int(progress.trial)}/{int(progress.trials_per_segment)}",
+            )
+            table.add_row("best_score", f"{float(progress.best_selection_score):.6g}")
+            table.add_row("last_score", f"{float(progress.last_score):.6g}")
+            if progress.last_rejected:
+                table.add_row(
+                    "last_reject",
+                    Text(str(progress.last_reject_reason or "rejected"), style="red"),
+                )
+
+            strategy = self._canonicalize_strategy_name(self.state.strategy)
+            if progress.best_params:
+                table.add_row(
+                    "best_params",
+                    self._format_strategy_params(strategy, progress.best_params),
+                )
+
+        results.update(Panel(table, title="Tune", border_style="cyan", box=box.ROUNDED))
+
+    def _refresh_tune_view(self) -> None:
+        if self._tune_thread is None:
+            return
+
+        updated = False
+        while True:
+            try:
+                kind, payload = self._tune_events.get_nowait()
+            except queue.Empty:
+                break
+
+            if kind == "status":
+                self._tune_status = str(payload)
+                updated = True
+                continue
+
+            if kind == "progress":
+                progress = payload if isinstance(payload, TuneProgress) else None
+                if progress is not None:
+                    self._tune_progress = progress
+                    updated = True
+                continue
+
+            if kind == "done":
+                run_dir, summary, result = payload  # type: ignore[misc]
+                self._tune_thread = None
+                self._tune_stop = None
+                self._tune_run_dir = None
+                self._tune_started_at = None
+                self._tune_status = ""
+                self._tune_progress = None
+                self._tune_last_result_dir = run_dir
+
+                try:
+                    if hasattr(result, "strategy") and hasattr(result, "best_params_latest"):
+                        strategy_name = str(result.strategy)
+                        self.state.tune_last_run_dir = str(run_dir)
+                        self.state.tune_best_params[strategy_name] = dict(result.best_params_latest)
+                        self._render_settings()
+                except Exception:
+                    pass
+
+                results = self.query_one("#results", Static)
+                results.border_title = "Tune summary"
+                results.update(summary)
+                self._write_log(f"tune complete: {run_dir}")
+                return
+
+            if kind == "error":
+                self._tune_thread = None
+                self._tune_stop = None
+                self._tune_run_dir = None
+                self._tune_started_at = None
+                self._tune_status = ""
+                self._tune_progress = None
+                self._write_log(f"tune error: {payload}")
+                err = Table(show_header=False, box=box.SIMPLE)
+                err.add_column("k", style="bold red")
+                err.add_column("v")
+                err.add_row("status", "tune failed")
+                err.add_row("error", str(payload))
+                results = self.query_one("#results", Static)
+                results.border_title = "Tune failed"
+                results.update(Panel(err, title="Tune", border_style="red", box=box.ROUNDED))
+                return
+
+        if updated:
+            self._render_tune_live()
+
+    def _start_tune(self) -> None:
+        if self._tune_thread is not None:
+            if self._tune_thread.is_alive():
+                self._write_log("tune already running")
+                return
+            self._tune_thread = None
+
+        strategy = self._canonicalize_strategy_name(self.state.strategy)
+        self._ensure_strategy_params(strategy)
+
+        run_dir = Path("outputs") / "tuning" / f"tui_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self._tune_run_dir = run_dir
+        self._tune_started_at = time.monotonic()
+        self._tune_status = "preparing…"
+        self._tune_progress = None
+        self._tune_last_result_dir = None
+
+        while True:
+            try:
+                _ = self._tune_events.get_nowait()
+            except queue.Empty:
+                break
+
+        self._render_tune_live()
+        self._write_log(f"starting tune: {run_dir}")
+
+        snapshot = self.state.to_dict()
+        snapshot["strategy"] = strategy
+
+        stop_event = Event()
+        self._tune_stop = stop_event
+
+        def _worker() -> None:
+            try:
+                run_dir.mkdir(parents=True, exist_ok=True)
+
+                mkt = parse_market(str(snapshot.get("market", "equity")))
+
+                raw_symbols = [s.strip() for s in str(snapshot.get("symbols", "")).split(",") if s.strip()]
+                canonical_strategy = self._canonicalize_strategy_name(str(snapshot.get("strategy", strategy)))
+                if canonical_strategy in {"nec_x", "nec_pdt"} and len(raw_symbols) < 2:
+                    raw_symbols = default_symbols(mkt, count=2)
+
+                symbols = coerce_symbols_for_market(raw_symbols, mkt)
+                if not symbols:
+                    raise ValueError("symbols not set")
+
+                tf = parse_bar_timeframe(str(snapshot.get("bar_timeframe", "1Min")))
+                start_dt = parse_iso_datetime(snapshot.get("start")) if snapshot.get("start") else None
+                end_dt = parse_iso_datetime(snapshot.get("end")) if snapshot.get("end") else None
+
+                alpaca_settings = None
+                timeframe = snapshot.get("timeframe")
+                data_source = str(snapshot.get("data_source", "sample"))
+                if data_source in {"alpaca", "coinbase"} and timeframe:
+                    try:
+                        delta = _parse_relative_timeframe(str(timeframe))
+                    except Exception as exc:
+                        raise ValueError(f"invalid timeframe: {timeframe}") from exc
+                    end_dt = now_ny()
+                    start_dt = end_dt - delta
+
+                if data_source == "alpaca":
+                    if not (start_dt and end_dt):
+                        raise ValueError("start/end required for alpaca data")
+                    self._tune_events.put(("status", "authenticating alpaca…"))
+                    alpaca_settings = get_alpaca_settings(require_keys=True)
+                elif data_source == "coinbase":
+                    if not (start_dt and end_dt):
+                        raise ValueError("start/end required for coinbase data")
+
+                csv_path = Path(snapshot["csv_path"]) if snapshot.get("csv_path") else None
+                csv_dir = csv_path if (csv_path and csv_path.is_dir()) else None
+                csv_file = csv_path if (csv_path and csv_path.is_file()) else None
+
+                self._tune_events.put(("status", "loading bars…"))
+                universe = load_universe_bars(
+                    symbols=symbols,
+                    data_source=data_source,
+                    timeframe=tf,
+                    start=start_dt,
+                    end=end_dt,
+                    csv_path=csv_file,
+                    csv_dir=csv_dir,
+                    alpaca_settings=alpaca_settings,
+                    alpaca_feed=str(snapshot.get("alpaca_feed", "delayed_sip")),
+                    market=mkt.value,
+                )
+                data_hint = universe.hint
+                bars_by_symbol = universe.bars_by_symbol
+
+                if timeframe and data_source != "alpaca":
+                    delta = _parse_relative_timeframe(str(timeframe))
+                    end_dt = min(pd.Timestamp(df.index[-1]).to_pydatetime() for df in bars_by_symbol.values())
+                    start_dt = end_dt - delta
+                    for s in list(bars_by_symbol):
+                        df = bars_by_symbol[s]
+                        df = df[(df.index >= start_dt) & (df.index <= end_dt)]
+                        bars_by_symbol[s] = df
+
+                self._tune_events.put(("status", "tuning (walk-forward)…"))
+
+                backtest_cfg = BacktestConfig(
+                    symbols=symbols,
+                    initial_cash=float(snapshot.get("initial_cash", 100_000.0)),
+                    max_position_notional_usd=float(snapshot.get("max_position_notional_usd", 10_000.0)),
+                    slippage_bps=float(snapshot.get("slippage_bps", 0.0)),
+                    allow_short=bool(snapshot.get("allow_short", False)),
+                )
+                tune_cfg = TuneConfig(
+                    trials_per_segment=int(snapshot.get("tune_trials_per_segment", 60)),
+                    seed=int(snapshot.get("tune_seed", 7)),
+                    drift_frac=(
+                        None
+                        if float(snapshot.get("tune_drift_frac", 0.50) or 0.0) == 0.0
+                        else float(snapshot.get("tune_drift_frac", 0.50))
+                    ),
+                    improvement_margin=float(snapshot.get("tune_improvement_margin", 0.0) or 0.0),
+                    objective=ObjectiveConfig(),
+                    walk_forward=WalkForwardConfig(
+                        train=str(snapshot.get("tune_train", "30d")),
+                        validate=str(snapshot.get("tune_validate", "7d")),
+                        test=str(snapshot.get("tune_test", "7d")),
+                        step=str(snapshot.get("tune_step", "7d")),
+                    ),
+                    keep_best_test_runs=True,
+                )
+
+                base_params = dict((snapshot.get("strategy_params") or {}).get(strategy, {}))
+
+                def _progress(p: TuneProgress) -> None:
+                    self._tune_events.put(("progress", p))
+
+                result = tune_walk_forward(
+                    bars_by_symbol=bars_by_symbol,
+                    market=mkt.value,
+                    symbols=symbols,
+                    strategy=strategy,
+                    backtest_cfg=backtest_cfg,
+                    tune_cfg=tune_cfg,
+                    run_dir=run_dir,
+                    base_params=base_params,
+                    stop_event=stop_event,
+                    on_progress=_progress,
+                )
+
+                self._tune_events.put(("status", "finalizing…"))
+
+                summary = Table(title="Tune summary", show_header=False, box=box.SIMPLE)
+                summary.add_column("k", style="bold")
+                summary.add_column("v")
+                summary.add_row("run_dir", str(run_dir))
+                summary.add_row("market", mkt.value)
+                summary.add_row("symbols", ",".join(symbols))
+                summary.add_row("data", f"{data_source} ({data_hint})")
+                summary.add_row("strategy", strategy)
+                summary.add_row("segments", str(len(result.selections)))
+                if result.selections:
+                    last = result.selections[-1]
+                    test_stats = (last.test or {}).get("stats") or {}
+                    summary.add_row("latest_test_return", f"{float(test_stats.get('total_return', 0.0)):.4%}")
+                    summary.add_row("latest_test_dd", f"{float(test_stats.get('max_drawdown', 0.0)):.4%}")
+                    summary.add_row("latest_test_sharpe", f"{float(test_stats.get('sharpe', 0.0)):.2f}")
+                    summary.add_row("latest_test_trades", str(int(test_stats.get('trades', 0) or 0)))
+                    summary.add_row(
+                        "latest_test_liqs",
+                        str(int(test_stats.get("liquidation_count", 0) or 0)),
+                    )
+                    summary.add_row(
+                        "best_params_latest",
+                        self._format_strategy_params(strategy, result.best_params_latest),
+                    )
+                    summary.add_row("apply", "run /tune apply to copy tuned params into settings")
+                summary.add_row("best_params_file", str(run_dir / "best_params.json"))
+                summary.add_row("stability_file", str(run_dir / "stability.json"))
+
+                self._tune_events.put(("done", (run_dir, summary, result)))
+            except Exception as exc:
+                self._tune_events.put(("error", str(exc)))
+
+        self._tune_thread = Thread(target=_worker, daemon=True)
+        self._tune_thread.start()
+        self._render_settings()
+
+    def _stop_tune(self) -> None:
+        if self._tune_stop is None:
+            self._write_log("tune is not running")
+            return
+        self._tune_stop.set()
+        self._write_log("tune stop requested")
+
+    def _apply_tuned_params(self) -> None:
+        strategy = self._canonicalize_strategy_name(self.state.strategy)
+        tuned = self.state.tune_best_params.get(strategy)
+        if not tuned:
+            self._write_log(f"no tuned params available for {strategy} (run /tune first)")
+            return
+        self.state.strategy_params[strategy] = dict(tuned)
+        self._ensure_strategy_params(strategy)
+        self._render_settings()
+        self._write_log(f"applied tuned params to {strategy}")
+
     def _run_backtest(self) -> None:
         if self._backtest_thread is not None:
             if self._backtest_thread.is_alive():
@@ -2015,18 +2463,22 @@ class AtlasTui(App):
                 alpaca_settings = None
                 timeframe = snapshot.get("timeframe")
                 data_source = str(snapshot.get("data_source", "sample"))
+                if data_source in {"alpaca", "coinbase"} and timeframe:
+                    try:
+                        delta = _parse_relative_timeframe(str(timeframe))
+                    except Exception as exc:
+                        raise ValueError(f"invalid timeframe: {timeframe}") from exc
+                    end_dt = now_ny()
+                    start_dt = end_dt - delta
+
                 if data_source == "alpaca":
-                    if timeframe:
-                        try:
-                            delta = _parse_relative_timeframe(str(timeframe))
-                        except Exception as exc:
-                            raise ValueError(f"invalid timeframe: {timeframe}") from exc
-                        end_dt = now_ny()
-                        start_dt = end_dt - delta
                     if not (start_dt and end_dt):
                         raise ValueError("start/end required for alpaca data")
                     self._backtest_events.put(("status", "authenticating alpaca…"))
                     alpaca_settings = get_alpaca_settings(require_keys=True)
+                elif data_source == "coinbase":
+                    if not (start_dt and end_dt):
+                        raise ValueError("start/end required for coinbase data")
 
                 csv_path = Path(snapshot["csv_path"]) if snapshot.get("csv_path") else None
                 csv_dir = csv_path if (csv_path and csv_path.is_dir()) else None
@@ -2088,14 +2540,24 @@ class AtlasTui(App):
                 def _progress(p: BacktestProgress) -> None:
                     self._backtest_events.put(("progress", p))
 
-                run_backtest(
-                    bars_by_symbol=bars_by_symbol,
-                    strategy=strat,
-                    cfg=cfg,
-                    run_dir=run_dir,
-                    progress=_progress,
-                    progress_interval_s=0.25,
-                )
+                if mkt == Market.DERIVATIVES:
+                    run_derivatives_backtest(
+                        bars_by_symbol=bars_by_symbol,
+                        strategy=strat,
+                        cfg=cfg,
+                        run_dir=run_dir,
+                        progress=_progress,
+                        progress_interval_s=0.25,
+                    )
+                else:
+                    run_backtest(
+                        bars_by_symbol=bars_by_symbol,
+                        strategy=strat,
+                        cfg=cfg,
+                        run_dir=run_dir,
+                        progress=_progress,
+                        progress_interval_s=0.25,
+                    )
 
                 self._backtest_events.put(("status", "finalizing…"))
 
@@ -2183,19 +2645,23 @@ class AtlasTui(App):
         end_dt = parse_iso_datetime(self.state.end) if self.state.end else None
 
         alpaca_settings = None
+        if self.state.data_source in {"alpaca", "coinbase"} and self.state.timeframe:
+            try:
+                delta = _parse_relative_timeframe(self.state.timeframe)
+            except Exception as exc:
+                raise ValueError(f"invalid timeframe: {self.state.timeframe}") from exc
+            end_dt = now_ny()
+            start_dt = end_dt - delta
+            self.state.start = start_dt.isoformat()
+            self.state.end = end_dt.isoformat()
+
         if self.state.data_source == "alpaca":
-            if self.state.timeframe:
-                try:
-                    delta = _parse_relative_timeframe(self.state.timeframe)
-                except Exception as exc:
-                    raise ValueError(f"invalid timeframe: {self.state.timeframe}") from exc
-                end_dt = now_ny()
-                start_dt = end_dt - delta
-                self.state.start = start_dt.isoformat()
-                self.state.end = end_dt.isoformat()
             if not (start_dt and end_dt):
                 raise ValueError("start/end required for alpaca data")
             alpaca_settings = get_alpaca_settings(require_keys=True)
+        elif self.state.data_source == "coinbase":
+            if not (start_dt and end_dt):
+                raise ValueError("start/end required for coinbase data")
 
         csv_path = Path(self.state.csv_path) if self.state.csv_path else None
         csv_dir = csv_path if (csv_path and csv_path.is_dir()) else None
@@ -2250,7 +2716,15 @@ class AtlasTui(App):
             allow_short=self.state.allow_short,
         )
 
-        run_backtest(bars_by_symbol=bars_by_symbol, strategy=strat, cfg=cfg, run_dir=run_dir)
+        if mkt == Market.DERIVATIVES:
+            run_derivatives_backtest(
+                bars_by_symbol=bars_by_symbol,
+                strategy=strat,
+                cfg=cfg,
+                run_dir=run_dir,
+            )
+        else:
+            run_backtest(bars_by_symbol=bars_by_symbol, strategy=strat, cfg=cfg, run_dir=run_dir)
 
         metrics = json.loads((run_dir / "metrics.json").read_text())
         equity_curve = pd.read_csv(

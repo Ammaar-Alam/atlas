@@ -27,7 +27,15 @@ from atlas.market import coerce_symbols_for_market, default_symbols, parse_marke
 from atlas.paper.runner import PaperConfig, run_paper_loop
 from atlas.strategies.registry import build_strategy
 from atlas.tui.app import run_tui
-from atlas.utils.time import parse_iso_datetime
+from atlas.utils.time import now_ny, parse_iso_datetime
+
+from atlas.ml.tune import (
+    ObjectiveConfig,
+    TuneConfig,
+    WalkForwardConfig,
+    parse_duration_spec,
+    tune_walk_forward,
+)
 
 app = typer.Typer(add_completion=False)
 logger = logging.getLogger(__name__)
@@ -151,6 +159,25 @@ def _run_id(prefix: str) -> str:
     return datetime.now().strftime(f"{prefix}_%Y%m%d_%H%M%S")
 
 
+def _load_strategy_params_for_name(path: Optional[Path], strategy_name: str) -> dict:
+    if path is None:
+        return {}
+    raw = json.loads(path.read_text())
+    if isinstance(raw, dict) and "params" in raw and isinstance(raw["params"], dict):
+        raw = raw["params"]
+    if isinstance(raw, dict) and "parameters" in raw and isinstance(raw["parameters"], dict):
+        raw = raw["parameters"]
+    if not isinstance(raw, dict):
+        raise ValueError("strategy params json must be an object")
+
+    canonical = strategy_name.replace("-", "_")
+    if canonical in raw and isinstance(raw[canonical], dict):
+        return dict(raw[canonical])
+    if strategy_name in raw and isinstance(raw[strategy_name], dict):
+        return dict(raw[strategy_name])
+    return dict(raw)
+
+
 @app.command()
 def tui() -> None:
     run_tui()
@@ -161,7 +188,7 @@ def download_bars(
     symbol: str = typer.Option(..., help="US equity symbol, e.g. SPY"),
     start: str = typer.Option(..., help="ISO datetime, e.g. 2024-01-02T09:30:00-05:00"),
     end: str = typer.Option(..., help="ISO datetime, e.g. 2024-01-02T16:00:00-05:00"),
-    timeframe: str = typer.Option("1Min", help="Bar timeframe, e.g. 1Min or 5Min"),
+    timeframe: str = typer.Option("1Min", help="Bar timeframe, e.g. 1Min, 5Min, 30Min, 1H, 4H"),
     feed: str = typer.Option(
         "delayed_sip",
         help="Alpaca data feed: iex, sip, delayed_sip (alias: uses sip but clamps end >=15m old).",
@@ -197,7 +224,7 @@ def backtest(
     csv_dir: Optional[Path] = typer.Option(
         None, help="CSV directory with per-symbol files when data-source=csv and multiple symbols"
     ),
-    bar_timeframe: str = typer.Option("1Min", help="Bar timeframe, e.g. 1Min or 5Min"),
+    bar_timeframe: str = typer.Option("1Min", help="Bar timeframe, e.g. 1Min, 5Min, 30Min, 1H, 4H"),
     start: Optional[str] = typer.Option(
         None, help="ISO datetime (required for alpaca; optional filter otherwise)"
     ),
@@ -336,10 +363,157 @@ def backtest(
 
 
 @app.command()
+def tune(
+    market: str = typer.Option("derivatives", help="Market mode: equity|crypto|derivatives"),
+    symbol: str = typer.Option("BTC-PERP", help="Primary symbol to tune"),
+    symbols: Optional[str] = typer.Option(
+        None, help="Comma-separated symbols, e.g. BTC-PERP,ETH-PERP (overrides --symbol)"
+    ),
+    data_source: str = typer.Option(
+        "coinbase", help="sample|csv|alpaca|coinbase", show_default=True
+    ),
+    csv_path: Optional[Path] = typer.Option(None, help="CSV path when data-source=csv"),
+    csv_dir: Optional[Path] = typer.Option(
+        None, help="CSV directory with per-symbol files when data-source=csv and multiple symbols"
+    ),
+    bar_timeframe: str = typer.Option("5Min", help="Bar timeframe, e.g. 1Min, 5Min, 30Min, 1H, 4H"),
+    start: Optional[str] = typer.Option(None, help="ISO datetime (optional if --timeframe is used)"),
+    end: Optional[str] = typer.Option(None, help="ISO datetime (optional if --timeframe is used)"),
+    timeframe: Optional[str] = typer.Option(
+        None, help="Relative lookback like 60d/6h/1y; sets end=now and start=end-timeframe"
+    ),
+    alpaca_feed: str = typer.Option(
+        "delayed_sip",
+        help="When data-source=alpaca: iex, sip, delayed_sip (alias: uses sip but clamps end >=15m old).",
+    ),
+    strategy: str = typer.Option("perp_flare", help="Strategy name to tune"),
+    strategy_params: Optional[Path] = typer.Option(
+        None, help="Optional JSON file with base strategy params (incumbent)"
+    ),
+    initial_cash: float = typer.Option(10_000.0, help="Starting cash"),
+    max_position_notional_usd: Optional[float] = typer.Option(
+        None, help="Max notional per symbol"
+    ),
+    slippage_bps: float = typer.Option(
+        1.25,
+        help="Fill cost per side in bps (slippage/spread proxy).",
+    ),
+    allow_short: bool = typer.Option(True, help="Allow negative exposure"),
+    trials_per_segment: int = typer.Option(60, help="Random trials per walk-forward segment"),
+    seed: int = typer.Option(7, help="RNG seed"),
+    train: str = typer.Option("30d", help="Train window size (e.g. 30d)"),
+    validate: str = typer.Option("7d", help="Validation window size (e.g. 7d)"),
+    test: str = typer.Option("7d", help="Test window size (e.g. 7d)"),
+    step: str = typer.Option("7d", help="Walk-forward step (e.g. 7d)"),
+    drift_frac: Optional[float] = typer.Option(
+        0.50,
+        help="Limit parameter drift vs previous segment by this fraction (set 0 to disable).",
+    ),
+    improvement_margin: float = typer.Option(
+        0.0,
+        help="Require selected params to beat incumbent validation score by this margin; otherwise keep incumbent.",
+    ),
+    out: Optional[Path] = typer.Option(
+        None, help="Optional path to write best params JSON (strategy-keyed)."
+    ),
+) -> None:
+    run_dir = Path("outputs") / "tuning" / _run_id("tune")
+    setup_logging(level=get_log_level(), log_file=run_dir / "run.log")
+
+    mkt = parse_market(market)
+    tf = parse_bar_timeframe(bar_timeframe)
+    start_dt = parse_iso_datetime(start) if start is not None else None
+    end_dt = parse_iso_datetime(end) if end is not None else None
+    if timeframe:
+        delta = parse_duration_spec(timeframe)
+        end_dt = now_ny()
+        start_dt = end_dt - delta
+
+    if max_position_notional_usd is None:
+        max_position_notional_usd = get_default_max_position_notional_usd(mode="backtest")
+
+    if symbols is not None:
+        raw_symbols = [s.strip() for s in (symbols or "").split(",") if s.strip()]
+    else:
+        raw_symbols = [symbol.strip()]
+    universe_symbols = coerce_symbols_for_market(raw_symbols, mkt)
+
+    alpaca_settings = get_alpaca_settings(require_keys=True) if data_source == "alpaca" else None
+    try:
+        universe = load_universe_bars(
+            symbols=universe_symbols,
+            data_source=data_source,
+            timeframe=tf,
+            start=start_dt,
+            end=end_dt,
+            csv_path=csv_path,
+            csv_dir=csv_dir,
+            alpaca_settings=alpaca_settings,
+            alpaca_feed=alpaca_feed,
+            market=mkt.value,
+        )
+    except FileNotFoundError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    base_params = _load_strategy_params_for_name(strategy_params, strategy) if strategy_params else {}
+
+    backtest_cfg = BacktestConfig(
+        symbols=universe_symbols,
+        initial_cash=float(initial_cash),
+        max_position_notional_usd=float(max_position_notional_usd),
+        slippage_bps=float(slippage_bps),
+        allow_short=bool(allow_short),
+    )
+    tune_cfg = TuneConfig(
+        trials_per_segment=int(trials_per_segment),
+        seed=int(seed),
+        drift_frac=None if (drift_frac is None or float(drift_frac) == 0.0) else float(drift_frac),
+        improvement_margin=float(improvement_margin),
+        objective=ObjectiveConfig(),
+        walk_forward=WalkForwardConfig(train=train, validate=validate, test=test, step=step),
+        keep_best_test_runs=True,
+    )
+
+    t0 = time.perf_counter()
+    result = tune_walk_forward(
+        bars_by_symbol=universe.bars_by_symbol,
+        market=mkt.value,
+        symbols=universe_symbols,
+        strategy=strategy,
+        backtest_cfg=backtest_cfg,
+        tune_cfg=tune_cfg,
+        run_dir=run_dir,
+        base_params=base_params,
+    )
+    elapsed_s = time.perf_counter() - t0
+
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({result.strategy: result.best_params_latest}, indent=2))
+
+    table = Table(title="Tune summary", show_header=False)
+    table.add_column("k", style="bold")
+    table.add_column("v")
+    table.add_row("run_dir", str(result.run_dir))
+    table.add_row("strategy", result.strategy)
+    table.add_row("market", result.market)
+    table.add_row("symbols", ",".join(result.symbols))
+    table.add_row("segments", str(len(result.selections)))
+    table.add_row("elapsed", f"{elapsed_s:.2f}s")
+    table.add_row("best_params_latest", json.dumps(result.best_params_latest, sort_keys=True))
+    table.add_row("best_params_file", str(run_dir / "best_params.json"))
+    if out is not None:
+        table.add_row("out", str(out))
+    Console().print(table)
+
+
+@app.command()
 def paper(
     market: str = typer.Option("equity", help="Market mode: equity|crypto|derivatives"),
     symbols: list[str] = typer.Option(["SPY"], help="Symbols to trade, repeatable"),
-    bar_timeframe: str = typer.Option("1Min", help="Bar timeframe, e.g. 1Min or 5Min"),
+    bar_timeframe: str = typer.Option("1Min", help="Bar timeframe, e.g. 1Min, 5Min, 30Min, 1H, 4H"),
     alpaca_feed: str = typer.Option(
         "iex",
         help="Alpaca data feed for bars: iex, sip, delayed_sip (alias: uses sip but clamps end >=15m old).",

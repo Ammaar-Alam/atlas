@@ -96,6 +96,7 @@ Copy `.env.example` to `.env`.
 ```bash
 atlas --help
 atlas backtest --help
+atlas tune --help
 atlas paper --help
 atlas download-bars --help
 atlas tui
@@ -104,6 +105,7 @@ atlas tui
 `atlas tui` launches a full-screen terminal UI with live settings/results panels. Use slash commands such as:
 
 - `/backtest`
+- `/tune` (walk-forward parameter optimization)
 - `/timeframe 7d` (also supports `6h`, `1m`, `1y`, `clear`)
 - `/algorithm ma_crossover`
 - `/paper start` / `/paper stop`
@@ -133,6 +135,22 @@ Example (Coinbase futures/perps):
 # current Coinbase contract-style product_id (e.g. "BIP-20DEC30-CDE").
 atlas backtest --market derivatives --symbol BTC-PERP --data-source coinbase --bar-timeframe 5Min --start 2026-01-01T00:00:00Z --end 2026-01-02T00:00:00Z
 ```
+
+## Walk-forward parameter tuning (Option A)
+
+Atlas includes a walk-forward hyperparameter optimizer to tune strategy knobs on rolling train/validate/test windows.
+
+Example (PerpFlare on Coinbase BTC-PERP):
+
+```bash
+atlas tune --market derivatives --symbol BTC-PERP --data-source coinbase --bar-timeframe 5Min --timeframe 60d --trials-per-segment 60 --train 30d --validate 7d --test 7d --step 7d
+```
+
+The run directory includes:
+
+- `best_params.json` (strategy-keyed params usable via `--strategy-params`)
+- `selections.json` (chosen params per segment)
+- `stability.json` (stability summary across segments)
 
 ## Strategy wiring
 

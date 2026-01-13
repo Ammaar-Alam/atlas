@@ -14,7 +14,7 @@ from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from atlas.config import AlpacaSettings
-from atlas.data.bars import parse_bar_timeframe
+from atlas.data.bars import BarTimeframe, parse_bar_timeframe
 from atlas.utils.time import NY_TZ, now_ny
 
 logger = logging.getLogger(__name__)
@@ -68,6 +68,22 @@ def parse_alpaca_feed(value: str) -> AlpacaFeedConfig:
         return AlpacaFeedConfig(api_feed=DataFeed.SIP, cache_label="delayed_sip", min_end_delay_minutes=16)
 
     raise ValueError("alpaca feed must be one of: iex, sip, delayed_sip")
+
+def to_alpaca_timeframe(tf: BarTimeframe) -> TimeFrame:
+    """
+    Convert our minute-based BarTimeframe to an Alpaca TimeFrame.
+
+    Alpaca supports hour-based timeframes natively; using Hour units for exact
+    hour multiples avoids relying on "N minutes" support for larger windows.
+    """
+    minutes = int(tf.minutes)
+    if minutes <= 0:
+        raise ValueError("bar timeframe minutes must be > 0")
+    if minutes % 1440 == 0:
+        return TimeFrame(amount=minutes // 1440, unit=TimeFrameUnit.Day)
+    if minutes % 60 == 0:
+        return TimeFrame(amount=minutes // 60, unit=TimeFrameUnit.Hour)
+    return TimeFrame(amount=minutes, unit=TimeFrameUnit.Minute)
 
 
 def _clamp_end_for_feed(end: datetime, *, delay_minutes: int) -> datetime:
@@ -161,7 +177,7 @@ def download_stock_bars_to_csv(
     )
     req = StockBarsRequest(
         symbol_or_symbols=[symbol],
-        timeframe=TimeFrame(amount=tf.minutes, unit=TimeFrameUnit.Minute),
+        timeframe=to_alpaca_timeframe(tf),
         start=start,
         end=end,
         feed=feed_cfg.api_feed,
@@ -207,7 +223,7 @@ def download_crypto_bars_to_csv(
     client = _make_crypto_client(settings)
     req = CryptoBarsRequest(
         symbol_or_symbols=[symbol],
-        timeframe=TimeFrame(amount=tf.minutes, unit=TimeFrameUnit.Minute),
+        timeframe=to_alpaca_timeframe(tf),
         start=start_utc,
         end=end_utc,
     )

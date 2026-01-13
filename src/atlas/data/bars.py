@@ -15,24 +15,34 @@ class BarTimeframe:
     minutes: int
 
 
-_TF_RE = re.compile(r"^(?P<n>\\d+)\\s*min$", re.IGNORECASE)
+_TF_MIN_RE = re.compile(r"^(?P<n>\d+)\s*(?:min|m)$", re.IGNORECASE)
+_TF_HOUR_RE = re.compile(r"^(?P<n>\d+)\s*(?:h|hr|hour|hours)$", re.IGNORECASE)
 
 
 def parse_bar_timeframe(value: str) -> BarTimeframe:
     value = value.strip()
-    if value.lower() in {"1min", "1m"}:
-        return BarTimeframe(name="1Min", minutes=1)
-    if value.lower() in {"5min", "5m"}:
-        return BarTimeframe(name="5Min", minutes=5)
+    if not value:
+        raise ValueError("bar timeframe must be non-empty")
 
-    m = _TF_RE.match(value)
+    m = _TF_MIN_RE.match(value)
     if m:
         minutes = int(m.group("n"))
         if minutes <= 0:
             raise ValueError("bar timeframe minutes must be > 0")
+        if minutes >= 60 and minutes % 60 == 0:
+            hours = minutes // 60
+            return BarTimeframe(name=f"{hours}H", minutes=minutes)
         return BarTimeframe(name=f"{minutes}Min", minutes=minutes)
 
-    raise ValueError("unsupported bar timeframe, expected like 1Min or 5Min")
+    m = _TF_HOUR_RE.match(value)
+    if m:
+        hours = int(m.group("n"))
+        if hours <= 0:
+            raise ValueError("bar timeframe hours must be > 0")
+        minutes = hours * 60
+        return BarTimeframe(name=f"{hours}H", minutes=minutes)
+
+    raise ValueError("unsupported bar timeframe, expected like 1Min, 5Min, 30Min, 1H, 4H")
 
 
 def resample_ohlcv(

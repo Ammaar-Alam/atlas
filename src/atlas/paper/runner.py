@@ -14,7 +14,6 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
-from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from atlas.broker.alpaca_broker import (
     submit_limit_order,
@@ -23,7 +22,7 @@ from atlas.broker.alpaca_broker import (
     wait_for_fill,
 )
 from atlas.config import AlpacaSettings
-from atlas.data.alpaca_data import parse_alpaca_feed
+from atlas.data.alpaca_data import parse_alpaca_feed, to_alpaca_timeframe
 from atlas.data.bars import filter_regular_hours, parse_bar_timeframe
 from atlas.market import Market, coerce_symbols_for_market, parse_market
 from atlas.strategies.base import Strategy, StrategyState
@@ -115,7 +114,7 @@ def _fetch_recent_bars(
         client = _make_crypto_bars_client(settings)
         req = CryptoBarsRequest(
             symbol_or_symbols=symbols,
-            timeframe=TimeFrame(amount=tf.minutes, unit=TimeFrameUnit.Minute),
+            timeframe=to_alpaca_timeframe(tf),
             start=_to_utc(pd.Timestamp(start)),
             end=_to_utc(pd.Timestamp(end)),
         )
@@ -129,7 +128,7 @@ def _fetch_recent_bars(
         start = end - timedelta(minutes=max(lookback_bars * tf.minutes * 2, 10))
         req = StockBarsRequest(
             symbol_or_symbols=symbols,
-            timeframe=TimeFrame(amount=tf.minutes, unit=TimeFrameUnit.Minute),
+            timeframe=to_alpaca_timeframe(tf),
             start=start,
             end=end,
             feed=feed_cfg.api_feed,
