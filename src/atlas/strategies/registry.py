@@ -13,7 +13,9 @@ from atlas.strategies.no_trade import NoTrade
 from atlas.strategies.nec_pdt import NecPDT
 from atlas.strategies.nec_x import NecX
 from atlas.strategies.orb_trend import OrbTrend
+from atlas.strategies.orb_trend import OrbTrend
 from atlas.strategies.spy_open_close import SpyOpenClose
+from atlas.strategies.perp_flare import PerpFlare
 
 
 @dataclass(frozen=True)
@@ -176,6 +178,41 @@ def build_strategy(
             kill_switch=_get_float("kill_switch", 0.025),
         )
 
+    if name in {"perp_flare", "perp-flare"}:
+        universe_symbols = [s.strip().upper() for s in symbols if s.strip()]
+        if not universe_symbols:
+            raise ValueError("perp_flare requires at least 1 symbol")
+            
+        def _get_int(key: str, default: int) -> int:
+            raw = params.get(key, params.get(key.lower(), default))
+            return int(raw)
+
+        def _get_float(key: str, default: float) -> float:
+            raw = params.get(key, params.get(key.lower(), default))
+            return float(raw)
+
+        return PerpFlare(
+            symbols=tuple(universe_symbols),
+            atr_window=_get_int("atr_window", 14),
+            ema_fast=_get_int("ema_fast", 12),
+            ema_slow=_get_int("ema_slow", 24),
+            er_window=_get_int("er_window", 10),
+            breakout_window=_get_int("breakout_window", 20),
+            er_min=_get_float("er_min", 0.35),
+            taker_fee_bps=_get_float("taker_fee_bps", 3.0),
+            half_spread_bps=_get_float("half_spread_bps", 1.0),
+            base_slippage_bps=_get_float("base_slippage_bps", 1.5),
+            edge_floor_bps=_get_float("edge_floor_bps", 5.0),
+            k_cost=_get_float("k_cost", 1.5),
+            risk_per_trade=_get_float("risk_per_trade", 0.01),
+            stop_atr_mult=_get_float("stop_atr_mult", 2.0),
+            trail_atr_mult=_get_float("trail_atr_mult", 3.0),
+            max_margin_utilization=_get_float("max_margin_utilization", 0.65),
+            max_leverage=_get_float("max_leverage", 10.0),
+            maintenance_margin_rate=_get_float("maintenance_margin_rate", 0.05),
+            min_liq_buffer_atr=_get_float("min_liq_buffer_atr", 3.0),
+        )
+
     raise ValueError(f"unknown strategy: {name}")
 
 
@@ -187,5 +224,7 @@ def list_strategy_names() -> list[str]:
         "ma_crossover",
         "nec_x",
         "nec_pdt",
+        "nec_pdt",
         "orb_trend",
+        "perp_flare",
     ]

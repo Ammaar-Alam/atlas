@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.table import Table
 
 from atlas.backtest.engine import BacktestConfig, run_backtest
+from atlas.backtest.derivatives_engine import run_derivatives_backtest
 from atlas.config import (
     get_alpaca_settings,
     get_default_max_position_notional_usd,
@@ -184,13 +185,13 @@ def download_bars(
 
 @app.command()
 def backtest(
-    market: str = typer.Option("equity", help="Market mode: equity|crypto"),
+    market: str = typer.Option("equity", help="Market mode: equity|crypto|derivatives"),
     symbol: str = typer.Option("SPY", help="Symbol to backtest"),
     symbols: Optional[str] = typer.Option(
         None, help="Comma-separated symbols, e.g. SPY,QQQ (overrides --symbol)"
     ),
     data_source: str = typer.Option(
-        "sample", help="sample|csv|alpaca", show_default=True
+        "sample", help="sample|csv|alpaca|coinbase", show_default=True
     ),
     csv_path: Optional[Path] = typer.Option(None, help="CSV path when data-source=csv"),
     csv_dir: Optional[Path] = typer.Option(
@@ -230,6 +231,10 @@ def backtest(
         max_position_notional_usd = get_default_max_position_notional_usd(mode="backtest")
 
     mkt = parse_market(market)
+    from atlas.market import Market
+    # Ensure allow_short is True for derivatives unless explicitly forbidden?
+    # Actually CLI args override. But usually perps allow short.
+    
     tf = parse_bar_timeframe(bar_timeframe)
     start_dt = parse_iso_datetime(start) if start is not None else None
     end_dt = parse_iso_datetime(end) if end is not None else None
@@ -299,7 +304,15 @@ def backtest(
     common_index = common_index.sort_values()
 
     t0 = time.perf_counter()
-    run_backtest(bars_by_symbol=universe.bars_by_symbol, strategy=strat, cfg=cfg, run_dir=run_dir)
+    if mkt == Market.DERIVATIVES:
+        run_derivatives_backtest(
+            bars_by_symbol=universe.bars_by_symbol,
+            strategy=strat,
+            cfg=cfg,
+            run_dir=run_dir,
+        )
+    else:
+        run_backtest(bars_by_symbol=universe.bars_by_symbol, strategy=strat, cfg=cfg, run_dir=run_dir)
     elapsed_s = time.perf_counter() - t0
 
     if strategy_params is not None:
@@ -324,7 +337,7 @@ def backtest(
 
 @app.command()
 def paper(
-    market: str = typer.Option("equity", help="Market mode: equity|crypto"),
+    market: str = typer.Option("equity", help="Market mode: equity|crypto|derivatives"),
     symbols: list[str] = typer.Option(["SPY"], help="Symbols to trade, repeatable"),
     bar_timeframe: str = typer.Option("1Min", help="Bar timeframe, e.g. 1Min or 5Min"),
     alpaca_feed: str = typer.Option(

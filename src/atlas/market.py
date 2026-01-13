@@ -9,6 +9,7 @@ class Market(str, Enum):
 
     EQUITY = "equity"
     CRYPTO = "crypto"
+    DERIVATIVES = "derivatives"
 
 
 def parse_market(value: str) -> Market:
@@ -17,7 +18,9 @@ def parse_market(value: str) -> Market:
         return Market.EQUITY
     if v in {"crypto", "cryptocurrency", "cryptos"}:
         return Market.CRYPTO
-    raise ValueError(f"unsupported market: {value!r} (expected 'equity' or 'crypto')")
+    if v in {"derivatives", "perp", "perps", "futures"}:
+        return Market.DERIVATIVES
+    raise ValueError(f"unsupported market: {value!r} (expected 'equity', 'crypto', or 'derivatives')")
 
 
 CRYPTO_EQUIVALENTS: dict[str, str] = {
@@ -25,11 +28,21 @@ CRYPTO_EQUIVALENTS: dict[str, str] = {
     "QQQ": "ETH/USD",
 }
 
+DERIVATIVES_EQUIVALENTS: dict[str, str] = {
+    "SPY": "BTC-PERP",
+    "QQQ": "ETH-PERP",
+}
+
 
 def default_symbols(market: Market, *, count: int = 1) -> list[str]:
     if count <= 0:
         return []
-    base = ["SPY", "QQQ"] if market == Market.EQUITY else ["BTC/USD", "ETH/USD"]
+    if market == Market.EQUITY:
+        base = ["SPY", "QQQ"]
+    elif market == Market.CRYPTO:
+        base = ["BTC/USD", "ETH/USD"]
+    else:
+        base = ["BTC-PERP", "ETH-PERP"]
     return base[:count]
 
 
@@ -65,6 +78,19 @@ def coerce_symbols_for_market(symbols: Iterable[str], market: Market) -> list[st
                 if not quote:
                     quote = "USD"
                 s = f"{base}/{quote}"
+                if not quote:
+                    quote = "USD"
+                s = f"{base}/{quote}"
+        elif market == Market.DERIVATIVES:
+            s = DERIVATIVES_EQUIVALENTS.get(s, s)
+            s = s.replace(" ", "")
+            # Ensure it ends with -PERP if not explicit
+            if not s.endswith("-PERP") and "-PERP" not in s:
+                # Handle BTC/USD -> BTC-PERP
+                if "/" in s:
+                    s = s.split("/")[0]
+                # Naive guess: if user says BTC, assume BTC-PERP
+                s = f"{s}-PERP"
         out.append(s)
 
     seen: set[str] = set()

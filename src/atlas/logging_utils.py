@@ -27,3 +27,6 @@ def setup_logging(*, level: str, log_file: Optional[Path]) -> None:
         file_handler.setFormatter(formatter)
         root.addHandler(file_handler)
 
+
+def get_logger(name: str) -> logging.Logger:
+    return logging.getLogger(name)

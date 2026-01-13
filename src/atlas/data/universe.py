@@ -12,6 +12,7 @@ from atlas.config import AlpacaSettings
 from atlas.data.alpaca_data import load_crypto_bars_cached, load_stock_bars_cached
 from atlas.data.bars import BarTimeframe, filter_regular_hours, resample_ohlcv
 from atlas.data.csv_loader import load_bars_csv
+from atlas.data.coinbase_data import load_coinbase_bars_cached
 from atlas.market import Market, parse_market, safe_filename_symbol
 from atlas.utils.time import NY_TZ
 
@@ -114,10 +115,10 @@ def load_universe_bars(
         raise ValueError("symbols must be non-empty")
 
     mkt = parse_market(market)
-    if mkt == Market.CRYPTO and regular_hours_only:
-        # Crypto trades 24/7; don't drop overnight/weekend bars by default.
+    if mkt in {Market.CRYPTO, Market.DERIVATIVES} and regular_hours_only:
+        # Crypto + crypto-derivatives trade (near) 24/7; don't drop overnight/weekend bars by default.
         regular_hours_only = False
-    assume_tz = ZoneInfo("UTC") if mkt == Market.CRYPTO else NY_TZ
+    assume_tz = ZoneInfo("UTC") if mkt in {Market.CRYPTO, Market.DERIVATIVES} else NY_TZ
 
     bars_by_symbol: dict[str, pd.DataFrame] = {}
 
@@ -159,10 +160,42 @@ def load_universe_bars(
             if mkt == Market.CRYPTO
             else f"{start.isoformat()} -> {end.isoformat()} feed={alpaca_feed}"
         )
+    elif data_source == "coinbase":
+        if start is None or end is None:
+            raise ValueError("start/end are required when data_source=coinbase")
+        
+        # Map timeframe to Coinbase granularity
+        if timeframe.minutes == 1:
+            granularity = "ONE_MINUTE"
+        elif timeframe.minutes == 5:
+            granularity = "FIVE_MINUTE"
+        elif timeframe.minutes == 15:
+            granularity = "FIFTEEN_MINUTE"
+        elif timeframe.minutes == 60:
+            granularity = "ONE_HOUR"
+        elif timeframe.minutes == 360:
+            granularity = "SIX_HOUR"
+        elif timeframe.minutes == 1440:
+            granularity = "ONE_DAY"
+        else:
+             # Fallback: fetch 1 minute and let downstream resample
+             granularity = "ONE_MINUTE"
+
+        for symbol in symbols:
+            bars_by_symbol[symbol] = load_coinbase_bars_cached(
+                symbol=symbol,
+                start=start,
+                end=end,
+                granularity=granularity,
+            )
+        hint = f"{start.isoformat()} -> {end.isoformat()} coinbase"
     else:
-        raise ValueError("data_source must be one of: sample, csv, alpaca")
+        raise ValueError("data_source must be one of: sample, csv, alpaca, coinbase")
 
     for symbol, bars in list(bars_by_symbol.items()):
+        if bars is None or bars.empty:
+            raise ValueError(f"no data found for {symbol} (check symbol or source)")
+        
         if start is not None:
             bars = bars[bars.index >= start]
         if end is not None:
@@ -173,9 +206,9 @@ def load_universe_bars(
             bars = resample_ohlcv(
                 bars,
                 minutes=timeframe.minutes,
-                drop_zero_volume=(mkt != Market.CRYPTO),
+                drop_zero_volume=(mkt == Market.EQUITY),
             )
-        if mkt == Market.CRYPTO:
+        if mkt in {Market.CRYPTO, Market.DERIVATIVES}:
             bars = _densify_crypto_bars(bars, minutes=timeframe.minutes)
         bars_by_symbol[symbol] = bars
 

@@ -76,6 +76,22 @@ def get_alpaca_settings(*, require_keys: bool) -> AlpacaSettings:
     )
 
 
+@dataclass(frozen=True)
+class CoinbaseSettings:
+    api_key: str
+    api_secret: str
+    passphrase: Optional[str]
+
+
+def get_coinbase_settings() -> CoinbaseSettings:
+    load_env()
+    return CoinbaseSettings(
+        api_key=_env_str("COINBASE_API_KEY", "") or "",
+        api_secret=_env_str("COINBASE_API_SECRET", "") or "",
+        passphrase=_env_str("COINBASE_PASSPHRASE"),
+    )
+
+
 def get_log_level() -> str:
     load_env()
     return (_env_str("ATLAS_LOG_LEVEL", "INFO") or "INFO").upper()

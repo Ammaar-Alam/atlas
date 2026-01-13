@@ -116,12 +116,22 @@ Backtests can use:
 - `sample` (bundled CSV under `data/sample/`)
 - `csv` (a user-supplied CSV file)
 - `alpaca` (downloads minute bars via Alpaca Market Data into `data/alpaca/` and uses them)
+- `coinbase` (public Coinbase market-data for spot + futures/perps)
 
 Example (Alpaca):
 
 ```bash
 atlas download-bars --symbol SPY --start 2024-01-02T09:30:00-05:00 --end 2024-01-02T16:00:00-05:00
 atlas backtest --symbol SPY --data-source alpaca --start 2024-01-02T09:30:00-05:00 --end 2024-01-02T16:00:00-05:00
+```
+
+Example (Coinbase futures/perps):
+
+```bash
+# Market mode enables the derivatives backtest engine.
+# For Coinbase US futures/perps, Atlas accepts "BTC-PERP"/"ETH-PERP" and resolves to the
+# current Coinbase contract-style product_id (e.g. "BIP-20DEC30-CDE").
+atlas backtest --market derivatives --symbol BTC-PERP --data-source coinbase --bar-timeframe 5Min --start 2026-01-01T00:00:00Z --end 2026-01-02T00:00:00Z
 ```
 
 ## Strategy wiring

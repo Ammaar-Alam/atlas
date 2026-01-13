@@ -128,6 +128,26 @@ STRATEGY_PARAM_SPECS: dict[str, dict[str, type]] = {
         "daily_loss_limit": float,
         "kill_switch": float,
     },
+    "perp_flare": {
+        "atr_window": int,
+        "ema_fast": int,
+        "ema_slow": int,
+        "er_window": int,
+        "breakout_window": int,
+        "er_min": float,
+        "taker_fee_bps": float,
+        "half_spread_bps": float,
+        "base_slippage_bps": float,
+        "edge_floor_bps": float,
+        "k_cost": float,
+        "risk_per_trade": float,
+        "stop_atr_mult": float,
+        "trail_atr_mult": float,
+        "max_margin_utilization": float,
+        "max_leverage": float,
+        "maintenance_margin_rate": float,
+        "min_liq_buffer_atr": float,
+    },
 }
 
 STRATEGY_DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
@@ -183,8 +203,27 @@ STRATEGY_DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
         "k_cost": 2.0,
         "slippage_bps": 1.25,
         "min_hold_bars": 3,
-        "daily_loss_limit": 0.010,
         "kill_switch": 0.025,
+    },
+    "perp_flare": {
+        "atr_window": 14,
+        "ema_fast": 12,
+        "ema_slow": 24,
+        "er_window": 10,
+        "breakout_window": 20,
+        "er_min": 0.35,
+        "taker_fee_bps": 3.0,
+        "half_spread_bps": 1.0,
+        "base_slippage_bps": 1.5,
+        "edge_floor_bps": 5.0,
+        "k_cost": 1.5,
+        "risk_per_trade": 0.01,
+        "stop_atr_mult": 2.0,
+        "trail_atr_mult": 3.0,
+        "max_margin_utilization": 0.65,
+        "max_leverage": 10.0,
+        "maintenance_margin_rate": 0.05,
+        "min_liq_buffer_atr": 3.0,
     },
 }
 
@@ -271,13 +310,21 @@ class AtlasTui(App):
         "/papermax": "/papermaxnotional",
         "/equity": "/stock",
         "/stocks": "/stock",
+        "/stocks": "/stock",
         "/cryptos": "/crypto",
+        "/derivatives": "/derivative",
+        "/perp": "/derivative",
+        "/perps": "/derivative",
+        "/future": "/derivative",
+        "/futures": "/derivative",
     }
     BASE_COMMANDS = [
         "/help",
         "/?",
         "/stock",
+        "/stock",
         "/crypto",
+        "/derivative",
         "/backtest",
         "/paper",
         "/timeframe",
@@ -413,7 +460,9 @@ class AtlasTui(App):
             "orb_trend": "orb-trend",
             "ema_crossover": "ema-crossover",
             "spy_open_close": "spy-open-close",
+            "spy_open_close": "spy-open-close",
             "no_trade": "no-trade",
+            "perp_flare": "perp-flare",
         }
         alias = alias_map.get(strategy)
         if alias and alias in self.state.strategy_params and strategy not in self.state.strategy_params:
@@ -553,7 +602,7 @@ class AtlasTui(App):
         if cmd == "/short":
             return ["true", "false"]
         if cmd == "/data":
-            return ["sample", "csv", "alpaca"]
+            return ["sample", "csv", "alpaca", "coinbase"]
         if cmd in {"/feed", "/paperfeed"}:
             return ["iex", "delayed_sip", "sip"]
         if cmd == "/paperlookback":
@@ -582,6 +631,8 @@ class AtlasTui(App):
             return ["SPY", "QQQ"]
         if cmd == "/symbols":
             return ["SPY,QQQ"]
+        if cmd in {"/derivative", "/derivatives", "/perp", "/perps", "/future", "/futures"}:
+            return default_symbols(Market.DERIVATIVES, count=2)
         return []
 
     def _compute_suggestions(self, raw: str) -> list[str]:
@@ -799,6 +850,15 @@ class AtlasTui(App):
             self._write_log("market set to equity")
             return
 
+        if cmd == "/derivative":
+            self._set_market("derivatives")
+            self._write_log("market set to derivatives")
+            if args:
+                coerced = coerce_symbols_for_market([args[0]], Market.DERIVATIVES)
+                self.state.symbols = coerced[0] if coerced else ""
+                self._render_settings()
+            return
+
         if cmd == "/symbol" and args:
             mkt = parse_market(self.state.market)
             coerced = coerce_symbols_for_market([args[0]], mkt)
@@ -819,8 +879,8 @@ class AtlasTui(App):
 
         if cmd == "/data" and args:
             value = args[0].lower()
-            if value not in {"sample", "csv", "alpaca"}:
-                self._write_log("data source must be sample|csv|alpaca")
+            if value not in {"sample", "csv", "alpaca", "coinbase"}:
+                self._write_log("data source must be sample|csv|alpaca|coinbase")
                 return
             self.state.data_source = value
             self._render_settings()
