@@ -276,6 +276,7 @@ class AtlasTui(App):
         "/fast",
         "/slow",
         "/cash",
+        "/initialcash",
         "/maxnotional",
         "/slippage",
         "/short",
@@ -713,7 +714,7 @@ class AtlasTui(App):
 
     def _handle_command(self, text: str) -> None:
         parts = text.split()
-        cmd = parts[0].lower()
+        cmd = self._canonicalize_command(parts[0])
         args = parts[1:]
 
         if cmd in {"/help", "/?"}:
@@ -721,7 +722,7 @@ class AtlasTui(App):
                 "commands: /backtest, /paper start|stop, /timeframe <7d|6h|1m|1y|clear>, "
                 "/bar <1Min|5Min>, /algorithm <name>, /data <sample|csv|alpaca>, "
                 "/param <key> <value>, /params, "
-                "/fast <int>, /slow <int>, /cash <usd>, /maxnotional <usd>, /slippage <bps>, /short <true|false>, "
+                "/fast <int>, /slow <int>, /cash <usd> (/initialcash <usd>), /maxnotional <usd>, /slippage <bps>, /short <true|false>, "
                 "/feed <iex|delayed_sip|sip>, /paperfeed <iex|delayed_sip|sip>, /csv <path>, "
                 "/paperlookback <bars>, /paperpoll <seconds>, /papermaxnotional <usd>, "
                 "/paperclosed <true|false>, /paperrth <true|false>, /paperlimitbps <float>, /paperdry <true|false>, "
@@ -811,7 +812,15 @@ class AtlasTui(App):
             if value <= 0:
                 self._write_log("cash must be > 0")
                 return
+            prev_cash = float(self.state.initial_cash) if self.state.initial_cash else 0.0
+            prev_max_notional = float(self.state.max_position_notional_usd)
+            ratio = (
+                (prev_max_notional / prev_cash)
+                if prev_cash > 0 and prev_max_notional > 0
+                else (get_default_max_position_notional_usd(mode="backtest") / 100_000.0)
+            )
             self.state.initial_cash = value
+            self.state.max_position_notional_usd = max(float(value) * float(ratio), 1.0)
             self._render_settings()
             return
 

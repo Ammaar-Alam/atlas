@@ -1,0 +1,82 @@
+{
+  "symbols": "SPY,QQQ",
+  "data_source": "alpaca",
+  "csv_path": null,
+  "start": "2026-01-05T20:53:11.078214-05:00",
+  "end": "2026-01-12T20:53:11.078214-05:00",
+  "timeframe": "7d",
+  "bar_timeframe": "5Min",
+  "alpaca_feed": "delayed_sip",
+  "paper_feed": "iex",
+  "strategy": "orb_trend",
+  "fast_window": 10,
+  "slow_window": 30,
+  "strategy_params": {
+    "nec_x": {
+      "M": 6,
+      "V": 12,
+      "Wcorr": 12,
+      "rho_min": 0.9,
+      "strength_entry": 1.2,
+      "strength_exit": 0.2,
+      "H_max": 6,
+      "k_cost": 2.0,
+      "spread_floor_bps": 0.5,
+      "slip_bps": 0.75,
+      "daily_loss_limit": 0.01,
+      "kill_switch": 0.025
+    },
+    "ma_crossover": {
+      "fast_window": 10,
+      "slow_window": 30
+    },
+    "nec_pdt": {
+      "min_hold_bars": 1,
+      "M": 6,
+      "V": 12,
+      "eps": 1e-08,
+      "H": 12,
+      "base_thr_bps": 10.0,
+      "budget_step_bps": 4.0,
+      "atr_lookback_bars": 12,
+      "stop_atr_mult": 2.0,
+      "trail_atr_mult": 2.5,
+      "flip_confirm_bars": 3,
+      "max_day_trades_per_rolling_5_days": 3,
+      "half_spread_bps": 1.5,
+      "slippage_bps": 2.0,
+      "fee_bps": 0.3
+    },
+    "spy_open_close": {},
+    "no_trade": {},
+    "ema_crossover": {
+      "fast_window": 12,
+      "slow_window": 26
+    },
+    "orb_trend": {
+      "orb_minutes": 30,
+      "orb_breakout_bps": 6.0,
+      "confirm_bars": 2,
+      "atr_window": 20,
+      "er_window": 12,
+      "er_min": 0.4,
+      "expected_hold_bars": 12,
+      "k_cost": 2.5,
+      "slippage_bps": 1.25,
+      "min_hold_bars": 2,
+      "daily_loss_limit": 0.01,
+      "kill_switch": 0.025
+    }
+  },
+  "initial_cash": 100000.0,
+  "max_position_notional_usd": 100000.0,
+  "slippage_bps": 1.25,
+  "allow_short": false,
+  "paper_lookback_bars": 200,
+  "paper_poll_seconds": 60,
+  "paper_max_position_notional_usd": 1000.0,
+  "paper_regular_hours_only": true,
+  "paper_allow_trading_when_closed": false,
+  "paper_limit_offset_bps": 5.0,
+  "paper_dry_run": false
+}
