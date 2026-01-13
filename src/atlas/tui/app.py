@@ -27,6 +27,7 @@ from atlas.backtest.engine import BacktestConfig, BacktestProgress, run_backtest
 from atlas.config import get_alpaca_settings, get_default_max_position_notional_usd
 from atlas.data.bars import parse_bar_timeframe
 from atlas.data.universe import load_universe_bars
+from atlas.market import Market, coerce_symbols_for_market, default_symbols, parse_market
 from atlas.paper.runner import PaperConfig, run_paper_loop
 from atlas.strategies.registry import build_strategy, list_strategy_names
 from atlas.utils.time import now_ny, parse_iso_datetime
@@ -34,6 +35,7 @@ from atlas.utils.time import now_ny, parse_iso_datetime
 
 @dataclass
 class TuiState:
+    market: str = "equity"
     symbols: str = "SPY"
     data_source: str = "sample"
     csv_path: Optional[str] = None
@@ -266,10 +268,15 @@ class AtlasTui(App):
         "/paperlookbackbars": "/paperlookback",
         "/paperpolls": "/paperpoll",
         "/papermax": "/papermaxnotional",
+        "/equity": "/stock",
+        "/stocks": "/stock",
+        "/cryptos": "/crypto",
     }
     BASE_COMMANDS = [
         "/help",
         "/?",
+        "/stock",
+        "/crypto",
         "/backtest",
         "/paper",
         "/timeframe",
@@ -492,6 +499,38 @@ class AtlasTui(App):
     def _canonicalize_command(self, token: str) -> str:
         token = token.strip().lower()
         return self.COMMAND_ALIASES.get(token, token)
+
+    def _set_market(self, market: str) -> None:
+        try:
+            mkt = parse_market(market)
+        except ValueError as exc:
+            self._write_log(str(exc))
+            return
+
+        self.state.market = mkt.value
+
+        strategy = self._canonicalize_strategy_name(self.state.strategy)
+        current_symbols = [
+            s.strip() for s in str(self.state.symbols or "").split(",") if s.strip()
+        ]
+        if not current_symbols:
+            default_count = 2 if strategy in {"nec_x", "nec_pdt"} else 1
+            current_symbols = default_symbols(mkt, count=default_count)
+        else:
+            if mkt == Market.EQUITY and any("/" in s for s in current_symbols):
+                default_count = 2 if strategy in {"nec_x", "nec_pdt"} else 1
+                current_symbols = default_symbols(mkt, count=default_count)
+            else:
+                current_symbols = coerce_symbols_for_market(current_symbols, mkt)
+
+        if strategy in {"nec_x", "nec_pdt"}:
+            if len(current_symbols) < 2:
+                current_symbols = default_symbols(mkt, count=2)
+            elif len(current_symbols) > 2:
+                current_symbols = current_symbols[:2]
+
+        self.state.symbols = ",".join(current_symbols)
+        self._render_settings()
 
     def _arg_options(self, command: str) -> list[str]:
         cmd = self._canonicalize_command(command)
@@ -735,7 +774,7 @@ class AtlasTui(App):
 
         if cmd in {"/help", "/?"}:
             self._write_log(
-                "commands: /backtest, /paper start|stop, /timeframe <7d|6h|1m|1y|clear>, "
+                "commands: /stock, /crypto, /backtest, /paper start|stop, /timeframe <7d|6h|1m|1y|clear>, "
                 "/bar <1Min|5Min>, /algorithm <name>, /data <sample|csv|alpaca>, "
                 "/param <key> <value>, /params, "
                 "/fast <int>, /slow <int>, /cash <usd> (/initialcash <usd>), /maxnotional <usd>, /slippage <bps>, /short <true|false>, "
@@ -746,13 +785,31 @@ class AtlasTui(App):
             )
             return
 
+        if cmd == "/crypto":
+            self._set_market("crypto")
+            self._write_log("market set to crypto")
+            return
+
+        if cmd == "/stock":
+            self._set_market("equity")
+            self._write_log("market set to equity")
+            return
+
         if cmd == "/symbol" and args:
-            self.state.symbols = args[0].upper()
+            mkt = parse_market(self.state.market)
+            coerced = coerce_symbols_for_market([args[0]], mkt)
+            self.state.symbols = coerced[0] if coerced else ""
             self._render_settings()
             return
 
         if cmd == "/symbols" and args:
-            self.state.symbols = args[0].upper()
+            mkt = parse_market(self.state.market)
+            raw = " ".join(args)
+            parts: list[str] = []
+            for chunk in raw.split(","):
+                parts.extend([p.strip() for p in chunk.split() if p.strip()])
+            coerced = coerce_symbols_for_market(parts, mkt)
+            self.state.symbols = ",".join(coerced)
             self._render_settings()
             return
 
@@ -1010,15 +1067,16 @@ class AtlasTui(App):
             strategy = self._canonicalize_strategy_name(args[0])
             self.state.strategy = strategy
             self._ensure_strategy_params(strategy)
+            mkt = parse_market(self.state.market)
             if strategy in {"nec_x", "nec_pdt", "orb_trend"}:
                 current_symbols = [
                     s.strip().upper() for s in self.state.symbols.split(",") if s.strip()
                 ]
                 if strategy in {"nec_x", "nec_pdt"}:
                     if len(current_symbols) < 2:
-                        self.state.symbols = "SPY,QQQ"
+                        self.state.symbols = ",".join(default_symbols(mkt, count=2))
                         self._write_log(
-                            f"{strategy} is pair-based (2 symbols). Defaulting to SPY,QQQ. "
+                            f"{strategy} is pair-based (2 symbols). Defaulting to {self.state.symbols}. "
                             "Set via /symbols AAPL,TSLA"
                         )
                     elif len(current_symbols) > 2:
@@ -1027,8 +1085,12 @@ class AtlasTui(App):
                             f"{strategy} is pair-based (2 symbols). Using first two: {self.state.symbols}"
                         )
                 else:
-                    if not current_symbols or current_symbols == ["SPY"]:
-                        self.state.symbols = "SPY,QQQ"
+                    if (
+                        not current_symbols
+                        or current_symbols == ["SPY"]
+                        or current_symbols == ["BTC/USD"]
+                    ):
+                        self.state.symbols = ",".join(default_symbols(mkt, count=2))
                 self.state.bar_timeframe = "5Min"
                 params = self.state.strategy_params.get(strategy, {})
                 if strategy == "nec_x":
@@ -1042,7 +1104,7 @@ class AtlasTui(App):
                 else:
                     self.state.slippage_bps = float(params.get("slippage_bps", 1.25))
             elif strategy == "spy_open_close":
-                self.state.symbols = "SPY"
+                self.state.symbols = ",".join(default_symbols(mkt, count=1))
             self._render_settings()
             return
 
@@ -1146,6 +1208,10 @@ class AtlasTui(App):
         log_widget.write_line(message)
 
     def _render_settings(self) -> None:
+        try:
+            self.state.market = parse_market(self.state.market).value
+        except Exception:
+            self.state.market = "equity"
         self.state.strategy = self._canonicalize_strategy_name(self.state.strategy)
         self._ensure_strategy_params(self.state.strategy)
         table = Table(show_header=False, box=box.SIMPLE, expand=True, pad_edge=False)
@@ -1156,6 +1222,7 @@ class AtlasTui(App):
             table.add_row(Text(label, style="bold cyan"), "")
 
         _section("Data")
+        table.add_row("market", self.state.market)
         table.add_row("symbols", self.state.symbols)
         table.add_row("data_source", self.state.data_source)
         table.add_row("alpaca_feed", self.state.alpaca_feed)
@@ -1636,7 +1703,14 @@ class AtlasTui(App):
             try:
                 run_dir.mkdir(parents=True, exist_ok=True)
 
-                symbols = [s.strip().upper() for s in str(snapshot["symbols"]).split(",") if s.strip()]
+                mkt = parse_market(str(snapshot.get("market", "equity")))
+
+                raw_symbols = [s.strip() for s in str(snapshot.get("symbols", "")).split(",") if s.strip()]
+                canonical_strategy = self._canonicalize_strategy_name(str(snapshot.get("strategy", strategy)))
+                if canonical_strategy in {"nec_x", "nec_pdt"} and len(raw_symbols) < 2:
+                    raw_symbols = default_symbols(mkt, count=2)
+
+                symbols = coerce_symbols_for_market(raw_symbols, mkt)
                 if not symbols:
                     raise ValueError("symbols not set")
 
@@ -1675,6 +1749,7 @@ class AtlasTui(App):
                     csv_dir=csv_dir,
                     alpaca_settings=alpaca_settings,
                     alpaca_feed=str(snapshot.get("alpaca_feed", "delayed_sip")),
+                    market=mkt.value,
                 )
                 data_hint = universe.hint
                 bars_by_symbol = universe.bars_by_symbol
@@ -1800,7 +1875,12 @@ class AtlasTui(App):
         )
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        symbols = [s.strip().upper() for s in self.state.symbols.split(",") if s.strip()]
+        mkt = parse_market(self.state.market)
+        raw_symbols = [s.strip() for s in self.state.symbols.split(",") if s.strip()]
+        canonical_strategy = self._canonicalize_strategy_name(self.state.strategy)
+        if canonical_strategy in {"nec_x", "nec_pdt"} and len(raw_symbols) < 2:
+            raw_symbols = default_symbols(mkt, count=2)
+        symbols = coerce_symbols_for_market(raw_symbols, mkt)
         if not symbols:
             raise ValueError("symbols not set")
 
@@ -1837,6 +1917,7 @@ class AtlasTui(App):
             csv_dir=csv_dir,
             alpaca_settings=alpaca_settings,
             alpaca_feed=self.state.alpaca_feed,
+            market=mkt.value,
         )
         data_hint = universe.hint
         bars_by_symbol = universe.bars_by_symbol
@@ -1940,6 +2021,7 @@ class AtlasTui(App):
             self._write_log("paper loop already running")
             return
         settings = get_alpaca_settings(require_keys=True)
+        mkt = parse_market(self.state.market)
         run_dir = (
             Path("outputs")
             / "paper"
@@ -1954,6 +2036,7 @@ class AtlasTui(App):
         placeholder.add_column("v")
         placeholder.add_row("status", "starting paper loop…")
         placeholder.add_row("run_dir", str(run_dir))
+        placeholder.add_row("market", mkt.value)
         placeholder.add_row("symbols", self.state.symbols)
         placeholder.add_row("bar_timeframe", self.state.bar_timeframe)
         placeholder.add_row("strategy", self.state.strategy)
@@ -1961,16 +2044,22 @@ class AtlasTui(App):
         results.border_title = "Paper (live)"
         results.update(placeholder)
 
+        raw_symbols = [s.strip() for s in self.state.symbols.split(",") if s.strip()]
+        canonical_strategy = self._canonicalize_strategy_name(self.state.strategy)
+        if canonical_strategy in {"nec_x", "nec_pdt"} and len(raw_symbols) < 2:
+            raw_symbols = default_symbols(mkt, count=2)
+        symbols = coerce_symbols_for_market(raw_symbols, mkt)
+
         strat = build_strategy(
             name=self.state.strategy,
             params_path=None,
-            symbols=[s.strip().upper() for s in self.state.symbols.split(",") if s.strip()],
+            symbols=symbols,
             fast_window=self.state.fast_window,
             slow_window=self.state.slow_window,
             params=self.state.strategy_params.get(self.state.strategy),
         )
         cfg = PaperConfig(
-            symbols=[s.strip().upper() for s in self.state.symbols.split(",") if s.strip()],
+            symbols=symbols,
             bar_timeframe=self.state.bar_timeframe,
             alpaca_feed=self.state.paper_feed,
             lookback_bars=self.state.paper_lookback_bars,
@@ -1981,6 +2070,7 @@ class AtlasTui(App):
             allow_trading_when_closed=self.state.paper_allow_trading_when_closed,
             limit_offset_bps=self.state.paper_limit_offset_bps,
             dry_run=self.state.paper_dry_run,
+            market=mkt.value,
         )
 
         self._paper_stop = Event()

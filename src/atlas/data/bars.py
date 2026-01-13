@@ -39,6 +39,8 @@ def resample_ohlcv(bars: pd.DataFrame, *, minutes: int) -> pd.DataFrame:
     if len(bars) < 2 or minutes <= 1:
         return bars.copy()
 
+    if not isinstance(bars.index, pd.DatetimeIndex):
+        raise ValueError("bars index must be a DatetimeIndex")
     if bars.index.tz is None:
         raise ValueError("bars index must be tz-aware")
 
@@ -60,11 +62,15 @@ def resample_ohlcv(bars: pd.DataFrame, *, minutes: int) -> pd.DataFrame:
     return out[["open", "high", "low", "close", "volume"]].copy()
 
 
-def filter_regular_hours(bars: pd.DataFrame) -> pd.DataFrame:
+def filter_regular_hours(bars: pd.DataFrame, *, weekdays_only: bool = True) -> pd.DataFrame:
+    if not isinstance(bars.index, pd.DatetimeIndex):
+        raise ValueError("bars index must be a DatetimeIndex")
     if bars.index.tz is None:
         raise ValueError("bars index must be tz-aware")
     idx = bars.index.tz_convert(NY_TZ)
     bars = bars.copy()
     bars.index = idx
-    return bars.between_time(time(9, 30), time(15, 59, 59))
-
+    bars = bars.between_time(time(9, 30), time(15, 59, 59))
+    if weekdays_only:
+        bars = bars[bars.index.dayofweek < 5]
+    return bars

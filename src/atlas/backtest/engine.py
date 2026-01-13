@@ -11,6 +11,7 @@ import pandas as pd
 
 from atlas.backtest.metrics import compute_metrics
 from atlas.strategies.base import Strategy, StrategyState
+from atlas.utils.time import NY_TZ
 
 logger = logging.getLogger(__name__)
 
@@ -289,8 +290,11 @@ def run_backtest(
     ]
     trades = pd.DataFrame(trades_rows, columns=trade_cols)
     equity_curve = pd.DataFrame(equity_rows)
-    equity_curve["timestamp"] = pd.to_datetime(equity_curve["timestamp"], errors="raise")
-    equity_curve = equity_curve.set_index("timestamp").sort_index()
+    ts = pd.to_datetime(equity_curve["timestamp"], errors="raise", utc=True).dt.tz_convert(NY_TZ)
+    equity_curve = equity_curve.drop(columns=["timestamp"])
+    equity_curve.index = ts
+    equity_curve.index.name = "timestamp"
+    equity_curve = equity_curve.sort_index()
 
     metrics = compute_metrics(equity_curve, trades)
 

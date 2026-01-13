@@ -31,6 +31,16 @@ def _infer_bar_minutes(index: pd.DatetimeIndex) -> float:
     return median if median > 0 else 1.0
 
 
+def _infer_periods_per_year(index: pd.DatetimeIndex) -> float:
+    if not isinstance(index, pd.DatetimeIndex):
+        raise ValueError("equity_curve index must be a DatetimeIndex")
+    bar_minutes = _infer_bar_minutes(index)
+    has_weekend_bars = bool((index.dayofweek >= 5).any())
+    if has_weekend_bars:
+        return (365.0 * 1440.0) / bar_minutes
+    return (252.0 * 390.0) / bar_minutes
+
+
 def compute_metrics(equity_curve: pd.DataFrame, trades: pd.DataFrame) -> BacktestMetrics:
     eq = equity_curve["equity"].astype(float)
     total_return = float(eq.iloc[-1] / eq.iloc[0] - 1.0)
@@ -43,8 +53,7 @@ def compute_metrics(equity_curve: pd.DataFrame, trades: pd.DataFrame) -> Backtes
     if len(rets) < 2 or float(rets.std()) == 0.0:
         sharpe = 0.0
     else:
-        bar_minutes = _infer_bar_minutes(equity_curve.index)
-        periods_per_year = (252.0 * 390.0) / bar_minutes
+        periods_per_year = _infer_periods_per_year(equity_curve.index)
         sharpe = float((rets.mean() / rets.std()) * np.sqrt(periods_per_year))
 
     return BacktestMetrics(
@@ -53,4 +62,3 @@ def compute_metrics(equity_curve: pd.DataFrame, trades: pd.DataFrame) -> Backtes
         sharpe=sharpe,
         trades=int(len(trades)),
     )
-

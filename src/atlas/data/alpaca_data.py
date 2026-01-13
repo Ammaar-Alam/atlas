@@ -5,11 +5,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
-from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
 from alpaca.data.enums import DataFeed
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from atlas.config import AlpacaSettings
@@ -80,7 +81,29 @@ def _clamp_end_for_feed(end: datetime, *, delay_minutes: int) -> datetime:
 
 def _normalize_bars_df(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     if isinstance(df.index, pd.MultiIndex):
-        df = df.xs(symbol)
+        try:
+            df = df.xs(symbol)
+        except KeyError as exc:
+            raise RuntimeError(f"alpaca returned no bars for symbol: {symbol}") from exc
+
+    if "timestamp" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
+        ts = pd.to_datetime(df["timestamp"], errors="raise", utc=True)
+        df = df.drop(columns=["timestamp"])
+        df = df.copy()
+        df.index = ts
+
+    if not isinstance(df.index, pd.DatetimeIndex):
+        if isinstance(df.index, pd.RangeIndex):
+            raise RuntimeError(
+                f"unexpected bars response for {symbol}: no datetime index (is the symbol valid?)"
+            )
+        try:
+            df = df.copy()
+            df.index = pd.to_datetime(df.index, errors="raise", utc=True)
+        except Exception as exc:
+            raise RuntimeError(
+                f"unexpected bars index type from alpaca for {symbol}: {type(df.index).__name__}"
+            ) from exc
 
     df = df.sort_index()
     if df.index.tz is None:
@@ -91,7 +114,32 @@ def _normalize_bars_df(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     missing = [c for c in cols if c not in df.columns]
     if missing:
         raise RuntimeError(f"alpaca bars missing columns: {missing}")
-    return df[cols].copy()
+    out = df[cols].copy()
+    if not len(out):
+        raise RuntimeError(
+            f"alpaca returned no bars for {symbol} (check symbol/pair and date range)"
+        )
+    return out
+
+
+def _to_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=NY_TZ)
+    return dt.astimezone(ZoneInfo("UTC"))
+
+
+def _make_crypto_client(settings: AlpacaSettings) -> CryptoHistoricalDataClient:
+    kwargs: dict[str, object] = {}
+    if settings.api_key and settings.secret_key:
+        kwargs["api_key"] = settings.api_key
+        kwargs["secret_key"] = settings.secret_key
+    if settings.data_url_override:
+        kwargs["url_override"] = settings.data_url_override
+    try:
+        return CryptoHistoricalDataClient(**kwargs)
+    except TypeError:
+        kwargs.pop("url_override", None)
+        return CryptoHistoricalDataClient(**kwargs)
 
 
 def download_stock_bars_to_csv(
@@ -144,6 +192,42 @@ def download_stock_bars_to_csv(
     return out_path
 
 
+def download_crypto_bars_to_csv(
+    *,
+    settings: AlpacaSettings,
+    symbol: str,
+    start: datetime,
+    end: datetime,
+    timeframe: str,
+    out_path: Optional[Path],
+) -> Path:
+    tf = parse_bar_timeframe(timeframe)
+    start_utc = _to_utc(start)
+    end_utc = _to_utc(end)
+    client = _make_crypto_client(settings)
+    req = CryptoBarsRequest(
+        symbol_or_symbols=[symbol],
+        timeframe=TimeFrame(amount=tf.minutes, unit=TimeFrameUnit.Minute),
+        start=start_utc,
+        end=end_utc,
+    )
+    logger.info("downloading crypto bars from alpaca: %s %s -> %s", symbol, start_utc, end_utc)
+    res = client.get_crypto_bars(req)
+    bars = _normalize_bars_df(res.df, symbol)
+
+    if out_path is None:
+        out_path = _bars_cache_path(
+            Path.cwd(), AlpacaBarsDownload(symbol, start_utc, end_utc, timeframe, "crypto")
+        )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    export = bars.copy()
+    export.insert(0, "timestamp", export.index.astype(str))
+    export.to_csv(out_path, index=False)
+    logger.info("saved crypto bars to %s", out_path)
+    return out_path
+
+
 def load_stock_bars_cached(
     *,
     settings: AlpacaSettings,
@@ -177,6 +261,37 @@ def load_stock_bars_cached(
         out_path=path,
         feed=feed,
     )
+    df = pd.read_csv(path)
+    ts = pd.to_datetime(df["timestamp"], errors="raise", utc=True).dt.tz_convert(NY_TZ)
+    df = df.drop(columns=["timestamp"])
+    df.index = ts
+    df = df.sort_index()
+    return df[["open", "high", "low", "close", "volume"]].copy()
+
+
+def load_crypto_bars_cached(
+    *,
+    settings: AlpacaSettings,
+    symbol: str,
+    start: datetime,
+    end: datetime,
+    timeframe: str,
+) -> pd.DataFrame:
+    _ = parse_bar_timeframe(timeframe)
+    start_utc = _to_utc(start)
+    end_utc = _to_utc(end)
+    path = _bars_cache_path(
+        Path.cwd(), AlpacaBarsDownload(symbol, start_utc, end_utc, timeframe, "crypto")
+    )
+    if not path.exists():
+        download_crypto_bars_to_csv(
+            settings=settings,
+            symbol=symbol,
+            start=start_utc,
+            end=end_utc,
+            timeframe=timeframe,
+            out_path=path,
+        )
     df = pd.read_csv(path)
     ts = pd.to_datetime(df["timestamp"], errors="raise", utc=True).dt.tz_convert(NY_TZ)
     df = df.drop(columns=["timestamp"])

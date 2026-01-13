@@ -67,18 +67,17 @@ def build_strategy(
         return EmaCrossover(fast_window=fast, slow_window=slow, symbol=symbol)
 
     if name in {"spy_open_close", "spy-open-close"}:
-        if "SPY" not in {s.upper() for s in symbols}:
-            raise ValueError("spy_open_close requires --symbols SPY")
-        return SpyOpenClose()
+        symbol = str(params.get("symbol") or (symbols[0] if symbols else "SPY"))
+        return SpyOpenClose(symbol=symbol)
 
     if name in {"no_trade", "no-trade"}:
         return NoTrade()
 
     if name in {"nec_x", "nec-x"}:
         universe_symbols = [s.strip().upper() for s in symbols if s.strip()]
-        if len(universe_symbols) != 2:
+        if len(universe_symbols) < 2:
             raise ValueError(
-                f"nec_x requires exactly 2 symbols (got {len(universe_symbols)})"
+                f"nec_x requires at least 2 symbols (got {len(universe_symbols)})"
             )
         spy_symbol, qqq_symbol = universe_symbols[0], universe_symbols[1]
 
@@ -110,9 +109,9 @@ def build_strategy(
 
     if name in {"nec_pdt", "nec-pdt"}:
         universe_symbols = [s.strip().upper() for s in symbols if s.strip()]
-        if len(universe_symbols) != 2:
+        if len(universe_symbols) < 2:
             raise ValueError(
-                f"nec_pdt requires exactly 2 symbols (got {len(universe_symbols)})"
+                f"nec_pdt requires at least 2 symbols (got {len(universe_symbols)})"
             )
         spy_symbol, qqq_symbol = universe_symbols[0], universe_symbols[1]
 

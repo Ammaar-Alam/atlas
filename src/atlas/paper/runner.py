@@ -9,10 +9,11 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Optional
 from threading import Event
+from zoneinfo import ZoneInfo
 
 import pandas as pd
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
+from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from atlas.broker.alpaca_broker import (
@@ -24,6 +25,7 @@ from atlas.broker.alpaca_broker import (
 from atlas.config import AlpacaSettings
 from atlas.data.alpaca_data import parse_alpaca_feed
 from atlas.data.bars import filter_regular_hours, parse_bar_timeframe
+from atlas.market import Market, coerce_symbols_for_market, parse_market
 from atlas.strategies.base import Strategy, StrategyState
 from atlas.utils.time import NY_TZ, now_ny
 
@@ -43,38 +45,93 @@ class PaperConfig:
     allow_trading_when_closed: bool
     limit_offset_bps: float
     dry_run: bool
+    market: str = "equity"
 
 
-def _bars_client(settings: AlpacaSettings) -> StockHistoricalDataClient:
+def _stock_bars_client(settings: AlpacaSettings) -> StockHistoricalDataClient:
     return StockHistoricalDataClient(
         settings.api_key, settings.secret_key, url_override=settings.data_url_override
     )
 
 
+def _make_crypto_bars_client(settings: AlpacaSettings) -> CryptoHistoricalDataClient:
+    kwargs: dict[str, object] = {}
+    if settings.api_key and settings.secret_key:
+        kwargs["api_key"] = settings.api_key
+        kwargs["secret_key"] = settings.secret_key
+    if settings.data_url_override:
+        kwargs["url_override"] = settings.data_url_override
+    try:
+        return CryptoHistoricalDataClient(**kwargs)
+    except TypeError:
+        kwargs.pop("url_override", None)
+        return CryptoHistoricalDataClient(**kwargs)
+
+
+def _to_utc(dt: pd.Timestamp) -> pd.Timestamp:
+    if dt.tzinfo is None:
+        dt = dt.tz_localize(NY_TZ)
+    return dt.tz_convert(ZoneInfo("UTC"))
+
+
+def _normalize_bars_index_to_ny(df: pd.DataFrame) -> pd.DataFrame:
+    if isinstance(df.index, pd.MultiIndex):
+        symbols = df.index.get_level_values(0)
+        ts = pd.DatetimeIndex(df.index.get_level_values(1))
+        if ts.tz is None:
+            ts = ts.tz_localize("UTC")
+        ts = ts.tz_convert(NY_TZ)
+        out = df.copy()
+        out.index = pd.MultiIndex.from_arrays([symbols, ts], names=df.index.names)
+        return out
+    if isinstance(df.index, pd.DatetimeIndex):
+        ts = df.index
+        if ts.tz is None:
+            ts = ts.tz_localize("UTC")
+        out = df.copy()
+        out.index = ts.tz_convert(NY_TZ)
+        return out
+    raise RuntimeError("unexpected bars index type (expected DatetimeIndex or MultiIndex)")
+
+
 def _fetch_recent_bars(
     *,
-    client: StockHistoricalDataClient,
+    settings: AlpacaSettings,
     symbols: list[str],
     lookback_bars: int,
     timeframe: str,
     feed: str,
+    market: Market,
 ) -> pd.DataFrame:
     tf = parse_bar_timeframe(timeframe)
-    feed_cfg = parse_alpaca_feed(feed)
-    end = now_ny() - timedelta(minutes=feed_cfg.min_end_delay_minutes)
+    end = now_ny()
     start = end - timedelta(minutes=max(lookback_bars * tf.minutes * 2, 10))
-    req = StockBarsRequest(
-        symbol_or_symbols=symbols,
-        timeframe=TimeFrame(amount=tf.minutes, unit=TimeFrameUnit.Minute),
-        start=start,
-        end=end,
-        limit=max(lookback_bars, 10),
-        feed=feed_cfg.api_feed,
-    )
-    res = client.get_stock_bars(req).df
-    if res.index.tz is None:
-        res.index = res.index.tz_localize("UTC")
-    res.index = res.index.tz_convert(NY_TZ)
+
+    if market == Market.CRYPTO:
+        client = _make_crypto_bars_client(settings)
+        req = CryptoBarsRequest(
+            symbol_or_symbols=symbols,
+            timeframe=TimeFrame(amount=tf.minutes, unit=TimeFrameUnit.Minute),
+            start=_to_utc(pd.Timestamp(start)),
+            end=_to_utc(pd.Timestamp(end)),
+        )
+        res = client.get_crypto_bars(req).df
+    else:
+        client = _stock_bars_client(settings)
+        feed_cfg = parse_alpaca_feed(feed)
+        end = end - timedelta(minutes=feed_cfg.min_end_delay_minutes)
+        start = end - timedelta(minutes=max(lookback_bars * tf.minutes * 2, 10))
+        req = StockBarsRequest(
+            symbol_or_symbols=symbols,
+            timeframe=TimeFrame(amount=tf.minutes, unit=TimeFrameUnit.Minute),
+            start=start,
+            end=end,
+            limit=max(lookback_bars, 10),
+            feed=feed_cfg.api_feed,
+        )
+        res = client.get_stock_bars(req).df
+
+    res = _normalize_bars_index_to_ny(res)
     res = res.sort_index()
     res = res[["open", "high", "low", "close", "volume"]].copy()
     return res
@@ -108,8 +165,8 @@ def run_paper_loop(
     equity_path = run_dir / "equity_curve.csv"
 
     trade_client = trading_client(settings)
-    data_client = _bars_client(settings)
-    cfg_symbols = [s.strip().upper() for s in cfg.symbols if s.strip()]
+    mkt = parse_market(cfg.market)
+    cfg_symbols = coerce_symbols_for_market(cfg.symbols, mkt)
     if not cfg_symbols:
         raise ValueError("cfg.symbols must be non-empty")
     tf = parse_bar_timeframe(cfg.bar_timeframe)
@@ -175,42 +232,48 @@ def run_paper_loop(
                 logger.info("max loops reached, stopping")
                 return
 
-            clock = trade_client.get_clock()
-            market_open = bool(clock.is_open)
-            if (not market_open) and (not cfg.allow_trading_when_closed):
-                decision_ts = now_ny()
-                f_decisions_jsonl.write(
-                    json.dumps(
-                        {
-                            "timestamp": decision_ts.isoformat(),
-                            "targets": {},
-                            "reason": f"market closed: next_open={clock.next_open} next_close={clock.next_close}",
-                            "debug": {"market_open": market_open},
-                            "positions": {},
-                            "equity": float(trade_client.get_account().equity),
-                            "cash": float(trade_client.get_account().cash),
-                        }
+            market_open = True
+            clock = None
+            if mkt != Market.CRYPTO:
+                clock = trade_client.get_clock()
+                market_open = bool(clock.is_open)
+                if (not market_open) and (not cfg.allow_trading_when_closed):
+                    decision_ts = now_ny()
+                    f_decisions_jsonl.write(
+                        json.dumps(
+                            {
+                                "timestamp": decision_ts.isoformat(),
+                                "targets": {},
+                                "reason": f"market closed: next_open={clock.next_open} next_close={clock.next_close}",
+                                "debug": {"market_open": market_open, "market": mkt.value},
+                                "positions": {},
+                                "equity": float(trade_client.get_account().equity),
+                                "cash": float(trade_client.get_account().cash),
+                            }
+                        )
+                        + "\n"
                     )
-                    + "\n"
-                )
-                f_decisions_jsonl.flush()
+                    f_decisions_jsonl.flush()
 
-                next_open = getattr(clock, "next_open", None)
-                sleep_s = float(cfg.poll_seconds)
-                if next_open is not None:
-                    try:
-                        sleep_s = max((pd.Timestamp(next_open) - pd.Timestamp(decision_ts)).total_seconds(), sleep_s)
-                    except Exception:
-                        sleep_s = float(cfg.poll_seconds)
+                    next_open = getattr(clock, "next_open", None)
+                    sleep_s = float(cfg.poll_seconds)
+                    if next_open is not None:
+                        try:
+                            sleep_s = max(
+                                (pd.Timestamp(next_open) - pd.Timestamp(decision_ts)).total_seconds(),
+                                sleep_s,
+                            )
+                        except Exception:
+                            sleep_s = float(cfg.poll_seconds)
 
-                logger.info("market closed, sleeping %.1fs until next open", sleep_s)
-                if stop_event is not None:
-                    if stop_event.wait(sleep_s):
-                        logger.info("stop requested, exiting paper loop")
-                        return
-                else:
-                    time.sleep(sleep_s)
-                continue
+                    logger.info("market closed, sleeping %.1fs until next open", sleep_s)
+                    if stop_event is not None:
+                        if stop_event.wait(sleep_s):
+                            logger.info("stop requested, exiting paper loop")
+                            return
+                    else:
+                        time.sleep(sleep_s)
+                    continue
 
             now = pd.Timestamp.now(tz=NY_TZ)
             bar_open = now.floor(f"{int(tf.minutes)}min")
@@ -228,11 +291,12 @@ def run_paper_loop(
             last_handled_bar_open = bar_open
 
             bars_df = _fetch_recent_bars(
-                client=data_client,
+                settings=settings,
                 symbols=cfg_symbols,
                 lookback_bars=cfg.lookback_bars,
                 timeframe=cfg.bar_timeframe,
                 feed=cfg.alpaca_feed,
+                market=mkt,
             )
             if not isinstance(bars_df.index, pd.MultiIndex):
                 raise RuntimeError("expected multi-index bars response from alpaca")
@@ -308,6 +372,7 @@ def run_paper_loop(
                         "targets": targets,
                         "reason": decision.reason,
                         "debug": decision.debug,
+                        "market": mkt.value,
                         "positions": positions,
                         "equity": equity,
                         "cash": cash_balance,
@@ -372,7 +437,7 @@ def run_paper_loop(
                 else:
                     if market_open:
                         order_id = submit_market_order(
-                            client=trade_client, symbol=symbol, qty=qty, side=side
+                            client=trade_client, symbol=symbol, qty=qty, side=side, market=mkt.value
                         )
                     else:
                         last_price = float(bars_by_symbol[symbol]["close"].iloc[-1])
@@ -385,6 +450,7 @@ def run_paper_loop(
                             side=side,
                             limit_price=round(float(px), 2),
                             extended_hours=True,
+                            market=mkt.value,
                         )
 
                 order_row = {

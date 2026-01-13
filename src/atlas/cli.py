@@ -22,6 +22,7 @@ from atlas.data.alpaca_data import download_stock_bars_to_csv
 from atlas.data.bars import parse_bar_timeframe
 from atlas.data.universe import load_universe_bars
 from atlas.logging_utils import setup_logging
+from atlas.market import coerce_symbols_for_market, default_symbols, parse_market
 from atlas.paper.runner import PaperConfig, run_paper_loop
 from atlas.strategies.registry import build_strategy
 from atlas.tui.app import run_tui
@@ -183,6 +184,7 @@ def download_bars(
 
 @app.command()
 def backtest(
+    market: str = typer.Option("equity", help="Market mode: equity|crypto"),
     symbol: str = typer.Option("SPY", help="Symbol to backtest"),
     symbols: Optional[str] = typer.Option(
         None, help="Comma-separated symbols, e.g. SPY,QQQ (overrides --symbol)"
@@ -227,15 +229,21 @@ def backtest(
     if max_position_notional_usd is None:
         max_position_notional_usd = get_default_max_position_notional_usd(mode="backtest")
 
+    mkt = parse_market(market)
     tf = parse_bar_timeframe(bar_timeframe)
     start_dt = parse_iso_datetime(start) if start is not None else None
     end_dt = parse_iso_datetime(end) if end is not None else None
 
-    universe_symbols = (
-        [s.strip().upper() for s in (symbols or "").split(",") if s.strip()]
-        if symbols is not None
-        else [symbol.strip().upper()]
-    )
+    canonical_strategy = str(strategy).strip().lower().replace("-", "_")
+    if symbols is not None:
+        raw_symbols = [s.strip() for s in (symbols or "").split(",") if s.strip()]
+    else:
+        raw_symbols = (
+            default_symbols(mkt, count=2)
+            if canonical_strategy in {"nec_x", "nec_pdt"}
+            else [symbol.strip()]
+        )
+    universe_symbols = coerce_symbols_for_market(raw_symbols, mkt)
 
     alpaca_settings = get_alpaca_settings(require_keys=True) if data_source == "alpaca" else None
     try:
@@ -249,6 +257,7 @@ def backtest(
             csv_dir=csv_dir,
             alpaca_settings=alpaca_settings,
             alpaca_feed=alpaca_feed,
+            market=mkt.value,
         )
     except FileNotFoundError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -315,6 +324,7 @@ def backtest(
 
 @app.command()
 def paper(
+    market: str = typer.Option("equity", help="Market mode: equity|crypto"),
     symbols: list[str] = typer.Option(["SPY"], help="Symbols to trade, repeatable"),
     bar_timeframe: str = typer.Option("1Min", help="Bar timeframe, e.g. 1Min or 5Min"),
     alpaca_feed: str = typer.Option(
@@ -353,6 +363,12 @@ def paper(
     if max_position_notional_usd is None:
         max_position_notional_usd = get_default_max_position_notional_usd(mode="paper")
 
+    mkt = parse_market(market)
+    canonical_strategy = str(strategy).strip().lower().replace("-", "_")
+    if canonical_strategy in {"nec_x", "nec_pdt"} and len(symbols) < 2:
+        symbols = default_symbols(mkt, count=2)
+    symbols = coerce_symbols_for_market(symbols, mkt)
+
     strat = build_strategy(
         name=strategy,
         params_path=strategy_params,
@@ -373,6 +389,7 @@ def paper(
         allow_trading_when_closed=allow_trading_when_closed,
         limit_offset_bps=float(limit_offset_bps),
         dry_run=dry_run,
+        market=mkt.value,
     )
 
     logger.info("paper=%s allow_live=%s", settings.paper, settings.allow_live)

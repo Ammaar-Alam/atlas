@@ -10,6 +10,7 @@ from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
 from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
 
 from atlas.config import AlpacaSettings
+from atlas.market import Market, parse_market
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,10 @@ def trading_client(settings: AlpacaSettings) -> TradingClient:
     )
 
 
-def assert_market_open(client: TradingClient) -> None:
+def assert_market_open(client: TradingClient, *, market: str = "equity") -> None:
+    mkt = parse_market(market)
+    if mkt == Market.CRYPTO:
+        return
     clock = client.get_clock()
     if not clock.is_open:
         raise RuntimeError(f"market closed: next_open={clock.next_open} next_close={clock.next_close}")
@@ -46,16 +50,19 @@ def submit_market_order(
     symbol: str,
     qty: float,
     side: str,
+    market: str = "equity",
 ) -> str:
     if qty <= 0:
         raise ValueError("qty must be > 0")
 
+    mkt = parse_market(market)
+    tif = TimeInForce.GTC if mkt == Market.CRYPTO else TimeInForce.DAY
     req = MarketOrderRequest(
         symbol=symbol,
         qty=float(qty),
         side=OrderSide.BUY if side.upper() == "BUY" else OrderSide.SELL,
         type=OrderType.MARKET,
-        time_in_force=TimeInForce.DAY,
+        time_in_force=tif,
     )
     res = client.submit_order(req)
     return str(res.id)
@@ -69,20 +76,27 @@ def submit_limit_order(
     side: str,
     limit_price: float,
     extended_hours: bool,
+    market: str = "equity",
 ) -> str:
     if qty <= 0:
         raise ValueError("qty must be > 0")
     if limit_price <= 0:
         raise ValueError("limit_price must be > 0")
 
+    mkt = parse_market(market)
+    tif = TimeInForce.GTC if mkt == Market.CRYPTO else TimeInForce.DAY
+    kwargs: dict[str, object] = {}
+    if mkt != Market.CRYPTO:
+        kwargs["extended_hours"] = bool(extended_hours)
+
     req = LimitOrderRequest(
         symbol=symbol,
         qty=float(qty),
         side=OrderSide.BUY if side.upper() == "BUY" else OrderSide.SELL,
         type=OrderType.LIMIT,
-        time_in_force=TimeInForce.DAY,
+        time_in_force=tif,
         limit_price=float(limit_price),
-        extended_hours=bool(extended_hours),
+        **kwargs,
     )
     res = client.submit_order(req)
     return str(res.id)
