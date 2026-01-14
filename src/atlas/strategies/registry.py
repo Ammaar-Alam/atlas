@@ -13,9 +13,9 @@ from atlas.strategies.no_trade import NoTrade
 from atlas.strategies.nec_pdt import NecPDT
 from atlas.strategies.nec_x import NecX
 from atlas.strategies.orb_trend import OrbTrend
-from atlas.strategies.orb_trend import OrbTrend
 from atlas.strategies.spy_open_close import SpyOpenClose
 from atlas.strategies.perp_flare import PerpFlare
+from atlas.strategies.perp_hawk import PerpHawk
 
 
 @dataclass(frozen=True)
@@ -191,6 +191,16 @@ def build_strategy(
             raw = params.get(key, params.get(key.lower(), default))
             return float(raw)
 
+        def _get_opt_float(key: str, default: Optional[float]) -> Optional[float]:
+            raw = params.get(key, params.get(key.lower(), default))
+            if raw is None:
+                return default
+            return float(raw)
+
+        def _get_str(key: str, default: str) -> str:
+            raw = params.get(key, params.get(key.lower(), default))
+            return str(raw)
+
         return PerpFlare(
             symbols=tuple(universe_symbols),
             atr_window=_get_int("atr_window", 14),
@@ -209,8 +219,64 @@ def build_strategy(
             trail_atr_mult=_get_float("trail_atr_mult", 3.0),
             max_margin_utilization=_get_float("max_margin_utilization", 0.65),
             max_leverage=_get_float("max_leverage", 10.0),
+            sizing_mode=_get_str("sizing_mode", "risk"),
+            target_leverage=_get_opt_float("target_leverage", None),
             maintenance_margin_rate=_get_float("maintenance_margin_rate", 0.05),
             min_liq_buffer_atr=_get_float("min_liq_buffer_atr", 3.0),
+        )
+
+    if name in {"perp_hawk", "perp-hawk"}:
+        universe_symbols = [s.strip().upper() for s in symbols if s.strip()]
+        if not universe_symbols:
+            raise ValueError("perp_hawk requires at least 1 symbol")
+
+        def _get_int(key: str, default: int) -> int:
+            raw = params.get(key, params.get(key.lower(), default))
+            return int(raw)
+
+        def _get_float(key: str, default: float) -> float:
+            raw = params.get(key, params.get(key.lower(), default))
+            return float(raw)
+
+        def _get_bool(key: str, default: bool) -> bool:
+            raw = params.get(key, params.get(key.lower(), default))
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, (int, float)):
+                return bool(int(raw))
+            if isinstance(raw, str):
+                return raw.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+            return bool(default)
+
+        return PerpHawk(
+            atr_window=_get_int("atr_window", 14),
+            ema_fast=_get_int("ema_fast", 20),
+            ema_slow=_get_int("ema_slow", 60),
+            er_window=_get_int("er_window", 20),
+            breakout_window=_get_int("breakout_window", 20),
+            breakout_buffer_bps=_get_float("breakout_buffer_bps", 2.0),
+            er_min=_get_float("er_min", 0.30),
+            trend_z_min=_get_float("trend_z_min", 0.25),
+            min_atr_bps=_get_float("min_atr_bps", 5.0),
+            allow_trend_entry_without_breakout=_get_bool(
+                "allow_trend_entry_without_breakout", True
+            ),
+            risk_budget=_get_float("risk_budget", 0.010),
+            stop_atr_mult=_get_float("stop_atr_mult", 2.2),
+            trail_atr_mult=_get_float("trail_atr_mult", 3.2),
+            max_positions=_get_int("max_positions", 2),
+            rebalance_exposure_threshold=_get_float(
+                "rebalance_exposure_threshold", 0.05
+            ),
+            max_leverage=_get_float("max_leverage", 3.0),
+            max_margin_utilization=_get_float("max_margin_utilization", 0.35),
+            funding_entry_bps_per_day=_get_float("funding_entry_bps_per_day", 25.0),
+            funding_exit_bps_per_day=_get_float("funding_exit_bps_per_day", 60.0),
+            daily_loss_limit=_get_float("daily_loss_limit", 0.02),
+            kill_switch=_get_float("kill_switch", 0.10),
+            min_hold_bars=_get_int("min_hold_bars", 3),
+            flip_confirm_bars=_get_int("flip_confirm_bars", 3),
+            cooldown_bars=_get_int("cooldown_bars", 5),
         )
 
     raise ValueError(f"unknown strategy: {name}")
@@ -224,7 +290,7 @@ def list_strategy_names() -> list[str]:
         "ma_crossover",
         "nec_x",
         "nec_pdt",
-        "nec_pdt",
         "orb_trend",
         "perp_flare",
+        "perp_hawk",
     ]

@@ -165,8 +165,36 @@ STRATEGY_PARAM_SPECS: dict[str, dict[str, type]] = {
         "trail_atr_mult": float,
         "max_margin_utilization": float,
         "max_leverage": float,
+        "sizing_mode": str,
+        "target_leverage": float,
         "maintenance_margin_rate": float,
         "min_liq_buffer_atr": float,
+    },
+    "perp_hawk": {
+        "atr_window": int,
+        "ema_fast": int,
+        "ema_slow": int,
+        "er_window": int,
+        "breakout_window": int,
+        "breakout_buffer_bps": float,
+        "er_min": float,
+        "trend_z_min": float,
+        "min_atr_bps": float,
+        "allow_trend_entry_without_breakout": bool,
+        "risk_budget": float,
+        "stop_atr_mult": float,
+        "trail_atr_mult": float,
+        "max_positions": int,
+        "rebalance_exposure_threshold": float,
+        "max_leverage": float,
+        "max_margin_utilization": float,
+        "funding_entry_bps_per_day": float,
+        "funding_exit_bps_per_day": float,
+        "daily_loss_limit": float,
+        "kill_switch": float,
+        "min_hold_bars": int,
+        "flip_confirm_bars": int,
+        "cooldown_bars": int,
     },
 }
 
@@ -242,8 +270,36 @@ STRATEGY_DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
         "trail_atr_mult": 3.0,
         "max_margin_utilization": 0.65,
         "max_leverage": 10.0,
+        "sizing_mode": "risk",
+        "target_leverage": 10.0,
         "maintenance_margin_rate": 0.05,
         "min_liq_buffer_atr": 3.0,
+    },
+    "perp_hawk": {
+        "atr_window": 14,
+        "ema_fast": 20,
+        "ema_slow": 60,
+        "er_window": 20,
+        "breakout_window": 20,
+        "breakout_buffer_bps": 2.0,
+        "er_min": 0.30,
+        "trend_z_min": 0.25,
+        "min_atr_bps": 5.0,
+        "allow_trend_entry_without_breakout": True,
+        "risk_budget": 0.010,
+        "stop_atr_mult": 2.2,
+        "trail_atr_mult": 3.2,
+        "max_positions": 2,
+        "rebalance_exposure_threshold": 0.05,
+        "max_leverage": 3.0,
+        "max_margin_utilization": 0.35,
+        "funding_entry_bps_per_day": 25.0,
+        "funding_exit_bps_per_day": 60.0,
+        "daily_loss_limit": 0.02,
+        "kill_switch": 0.10,
+        "min_hold_bars": 3,
+        "flip_confirm_bars": 3,
+        "cooldown_bars": 5,
     },
 }
 
@@ -485,6 +541,8 @@ class AtlasTui(App):
             "ema-crossover": "ema_crossover",
             "spy-open-close": "spy_open_close",
             "no-trade": "no_trade",
+            "perp-flare": "perp_flare",
+            "perp-hawk": "perp_hawk",
         }
         if name in alias_map:
             return alias_map[name]
@@ -503,6 +561,7 @@ class AtlasTui(App):
             "spy_open_close": "spy-open-close",
             "no_trade": "no-trade",
             "perp_flare": "perp-flare",
+            "perp_hawk": "perp-hawk",
         }
         alias = alias_map.get(strategy)
         if alias and alias in self.state.strategy_params and strategy not in self.state.strategy_params:
@@ -577,6 +636,13 @@ class AtlasTui(App):
             expected = spec[key]
             if expected is int:
                 return self._parse_int_value(raw)
+            if expected is bool:
+                value = _parse_bool_arg(raw)
+                if value is None:
+                    raise ValueError("expected boolean")
+                return bool(value)
+            if expected is str:
+                return str(raw)
             return float(raw)
         try:
             return self._parse_int_value(raw)

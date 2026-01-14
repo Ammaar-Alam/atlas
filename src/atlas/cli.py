@@ -26,7 +26,7 @@ from atlas.logging_utils import setup_logging
 from atlas.market import coerce_symbols_for_market, default_symbols, parse_market
 from atlas.paper.runner import PaperConfig, run_paper_loop
 from atlas.strategies.registry import build_strategy
-from atlas.tui.app import run_tui
+# Textual (TUI) is an optional dependency. Import lazily in the `tui` command.
 from atlas.utils.time import now_ny, parse_iso_datetime
 
 from atlas.ml.tune import (
@@ -180,6 +180,13 @@ def _load_strategy_params_for_name(path: Optional[Path], strategy_name: str) -> 
 
 @app.command()
 def tui() -> None:
+    try:
+        from atlas.tui.app import run_tui
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "The TUI requires the optional 'textual' dependency. "
+            "Install it (e.g. `pip install textual`) to use `atlas tui`."
+        ) from exc
     run_tui()
 
 
@@ -248,6 +255,18 @@ def backtest(
     slippage_bps: Optional[float] = typer.Option(
         None,
         help="Fill cost per side in basis points (slippage/spread proxy). If omitted, nec_x/orb_trend default to 1.25 bps/side and nec_pdt defaults to 3.8 bps/side.",
+    ),
+    taker_fee_bps: float = typer.Option(
+        3.0,
+        help="Derivatives only: taker fee in bps (per side)",
+    ),
+    maintenance_margin_rate: float = typer.Option(
+        0.05,
+        help="Derivatives only: maintenance margin rate (e.g. 0.05 = 5%)",
+    ),
+    liquidation_fee_rate: float = typer.Option(
+        0.005,
+        help="Derivatives only: additional liquidation fee rate (e.g. 0.005 = 0.5%)",
     ),
     allow_short: bool = typer.Option(False, help="Allow negative exposure"),
 ) -> None:
@@ -320,6 +339,9 @@ def backtest(
             else slippage_bps
         ),
         allow_short=allow_short,
+        taker_fee_bps=float(taker_fee_bps),
+        maintenance_margin_rate=float(maintenance_margin_rate),
+        liquidation_fee_rate=float(liquidation_fee_rate),
     )
 
     common_index: Optional[pd.DatetimeIndex] = None

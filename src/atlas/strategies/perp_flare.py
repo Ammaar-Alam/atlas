@@ -43,6 +43,8 @@ class PerpFlare(Strategy):
     trail_atr_mult: float = 3.0
     max_margin_utilization: float = 0.65
     max_leverage: float = 10.0
+    sizing_mode: str = "risk"  # "risk" (default) or "leverage"
+    target_leverage: Optional[float] = None
 
     # Liquidation buffer (environment assumption; may be overridden via StrategyState.extra)
     maintenance_margin_rate: float = 0.05
@@ -207,26 +209,44 @@ class PerpFlare(Strategy):
             price = best["price"]
             atr = best["atr"]
             direction = best["dir"]
+            sizing_mode = str(extra.get("sizing_mode") or self.sizing_mode).lower().strip()
+            target_leverage = extra.get("target_leverage", self.target_leverage)
             
             # Risk limits
             risk_usd = equity * self.risk_per_trade
             stop_dist = self.stop_atr_mult * atr
 
-            if stop_dist <= 0 or price <= 0 or risk_usd <= 0:
+            if price <= 0:
                 return StrategyDecision(target_exposures)
 
-            desired_qty_base = risk_usd / stop_dist
-            desired_notional = desired_qty_base * price
+            risk_based_notional = 0.0
+            if stop_dist > 0 and risk_usd > 0:
+                risk_based_qty = risk_usd / stop_dist
+                risk_based_notional = risk_based_qty * price
+
+            if sizing_mode == "leverage":
+                if target_leverage is None or float(target_leverage) <= 0:
+                    return StrategyDecision(target_exposures)
+                desired_notional = float(target_leverage) * float(equity)
+            else:
+                if risk_based_notional <= 0:
+                    return StrategyDecision(target_exposures)
+                desired_notional = risk_based_notional
 
             # Risk cap from equity/leverage rules.
             risk_cap_notional = equity * self.max_leverage * self.max_margin_utilization
-            desired_notional = min(desired_notional, risk_cap_notional)
+            limiters: list[str] = []
+            if desired_notional > risk_cap_notional:
+                limiters.append("margin_cap")
+                desired_notional = risk_cap_notional
 
             # Engine-level cap (StrategyDecision exposures are interpreted as a
             # multiplier on cfg.max_position_notional_usd).
             if max_position_notional_usd <= 0:
                 return StrategyDecision(target_exposures)
-            desired_notional = min(desired_notional, max_position_notional_usd)
+            if desired_notional > max_position_notional_usd:
+                limiters.append("max_position_notional_usd")
+                desired_notional = max_position_notional_usd
             desired_qty_base = desired_notional / price if price > 0 else 0.0
 
             # Liquidation Buffer Check
@@ -263,4 +283,19 @@ class PerpFlare(Strategy):
                 exposure = desired_notional / max_position_notional_usd if max_position_notional_usd > 0 else 0.0
                 target_exposures[sym] = float(exposure) * float(direction)
 
-        return StrategyDecision(target_exposures)
+            decision_meta["sizing"] = {
+                "symbol": sym,
+                "sizing_mode": sizing_mode,
+                "equity": float(equity),
+                "risk_usd": float(risk_usd),
+                "stop_dist": float(stop_dist),
+                "risk_based_notional": float(risk_based_notional),
+                "target_leverage": float(target_leverage) if target_leverage is not None else None,
+                "desired_notional": float(desired_notional),
+                "risk_cap_notional": float(risk_cap_notional),
+                "max_position_notional_usd": float(max_position_notional_usd),
+                "effective_leverage": float(desired_notional / equity) if equity > 0 else None,
+                "limiters": limiters,
+            }
+
+        return StrategyDecision(target_exposures, debug=decision_meta)

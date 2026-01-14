@@ -27,4 +27,7 @@ def load_bars_csv(path: Path, *, assume_tz: ZoneInfo = NY_TZ) -> pd.DataFrame:
     if missing:
         raise ValueError(f"csv missing required columns: {sorted(missing)}")
 
-    return df[["open", "high", "low", "close", "volume"]].copy()
+    # Preserve optional columns when present (e.g. derivatives funding).
+    optional_cols = [c for c in ["funding_rate"] if c in df.columns]
+    cols = ["open", "high", "low", "close", "volume"] + optional_cols
+    return df[cols].copy()

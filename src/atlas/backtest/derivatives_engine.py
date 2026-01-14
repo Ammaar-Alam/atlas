@@ -72,10 +72,22 @@ def run_derivatives_backtest(
     holding_bars: dict[str, int] = {s: 0 for s in symbols}
     current_targets: dict[str, float] = {s: 0.0 for s in symbols}
     
-    # Funding Rate Mock (For now 0.0, or random, or loaded if we had it)
-    # Ideally bars_by_symbol should contain funding? Or separate dict?
-    # For now, we assume 0.0 funding 
-    current_funding_rates = {s: 0.0 for s in symbols} 
+    # Funding (optional): if present in bars it must be in a `funding_rate` column and is interpreted
+    # as an *hourly* rate (e.g. 0.0001 == 1 bp per hour). We accrue funding on the position held over
+    # the previous bar interval using the previous bar's funding rate.
+    current_funding_rates: dict[str, float] = {s: 0.0 for s in symbols}
+    prev_funding_rates: dict[str, float] = {}
+    prev_closes: dict[str, float] = {}
+    for s in symbols:
+        b = bars_by_symbol[s]
+        prev_closes[s] = float(b["close"].iloc[0])
+        if "funding_rate" in b.columns:
+            try:
+                prev_funding_rates[s] = float(b["funding_rate"].iloc[0] or 0.0)
+            except Exception:
+                prev_funding_rates[s] = 0.0
+        else:
+            prev_funding_rates[s] = 0.0
 
     pending_target_exposures: Optional[dict[str, float]] = None
     pending_reason: Optional[str] = None
@@ -92,6 +104,7 @@ def run_derivatives_backtest(
     current_day: Optional[object] = None
     day_start_equity = float(cfg.initial_cash)
     peak_equity = float(cfg.initial_cash)
+    prev_equity = float(cfg.initial_cash)
     last_progress_t = 0.0
 
     # Liquidation Params
@@ -104,14 +117,46 @@ def run_derivatives_backtest(
             opens = {s: float(bars_by_symbol[s]["open"].iloc[i]) for s in symbols}
             closes = {s: float(bars_by_symbol[s]["close"].iloc[i]) for s in symbols}
 
-            # Optional funding rate support: if the bars include a per-symbol column named
-            # "funding_rate", treat it as an hourly funding rate (e.g. 0.0001 == 1bp/hour).
+            # Per-bar accounting buckets (for PnL decomposition).
+            bar_funding_pnl = 0.0
+            bar_fees_paid = 0.0
+            bar_realized_pnl = 0.0
+            bar_liquidation_fee = 0.0
+            bar_slippage_cost_est = 0.0
+            bar_liquidated = False
+
+            # Accrue funding for the previous interval *before* liquidation checks / fills at this
+            # bar open. Funding is cash-settled.
+            if i > 0:
+                dt_hours = (pd.Timestamp(idx[i]) - pd.Timestamp(idx[i - 1])).total_seconds() / 3600.0
+                if dt_hours > 0:
+                    for s in symbols:
+                        qty = position_qty[s]
+                        if abs(qty) <= 1e-9:
+                            continue
+                        rate_prev = float(prev_funding_rates.get(s, 0.0) or 0.0)
+                        if abs(rate_prev) <= 0.0:
+                            continue
+                        bar_funding_pnl += -(qty * prev_closes[s]) * rate_prev * float(dt_hours)
+                    if abs(bar_funding_pnl) > 0.0:
+                        cash += float(bar_funding_pnl)
+
+            # Read current funding rates (if available) for strategy context and for the next bar's
+            # accrual.
             for s in symbols:
                 if "funding_rate" in bars_by_symbol[s].columns:
                     try:
-                        current_funding_rates[s] = float(bars_by_symbol[s]["funding_rate"].iloc[i])
+                        current_funding_rates[s] = float(bars_by_symbol[s]["funding_rate"].iloc[i] or 0.0)
                     except Exception:
                         current_funding_rates[s] = 0.0
+                else:
+                    current_funding_rates[s] = 0.0
+
+            # Snapshot position sign at the start of the bar (post-funding, pre-trade).
+            start_sign = {
+                s: (1 if position_qty[s] > 1e-9 else (-1 if position_qty[s] < -1e-9 else 0))
+                for s in symbols
+            }
 
             # Mark to Market Equity
             # Equity = Cash + Unrealized PnL
@@ -131,37 +176,69 @@ def run_derivatives_backtest(
 
             equity = cash + unrealized_pnl
             
-            # Liquidation Check
-            if equity < total_margin_used: # Simple check: Equity < Maintenance Margin
-                 # Liquidate ALL
-                 logger.warning(f"LIQUIDATION at {ts}: Equity {equity} < Maint {total_margin_used}")
-                 for s in symbols:
-                     qty = position_qty[s]
-                     if abs(qty) > 1e-9:
-                         px = opens[s]
-                         # Liquidate at open
-                         fill_val = abs(qty) * px
-                         trans_cost = fill_val * (slippage_rate + fee_rate + LIQ_FEE)
-                         realized_pnl = (px - entry_prices[s]) * qty
-                         cash += realized_pnl - trans_cost
-                         
-                         trades_rows.append({
-                             "timestamp": ts.isoformat(),
-                             "symbol": s,
-                             "side": "SELL" if qty > 0 else "BUY",
-                             "qty": abs(qty),
-                             "fill_price": px,
-                             "notional": fill_val,
-                             "cash_after": cash,
-                             "position_qty_after": 0.0,
-                             "strategy_reason": "LIQUIDATION",
-                         })
-                         position_qty[s] = 0.0
-                         entry_prices[s] = 0.0
-                         current_targets[s] = 0.0
-                 
-                 # Reset equity
-                 equity = cash # Cash is now the remaining equity
+            # Liquidation Check (very simplified). Liquidate ALL if equity drops below total
+            # maintenance margin requirement.
+            if equity < total_margin_used:
+                bar_liquidated = True
+                logger.warning(f"LIQUIDATION at {ts}: Equity {equity} < Maint {total_margin_used}")
+                for s in symbols:
+                    qty = position_qty[s]
+                    if abs(qty) <= 1e-9:
+                        continue
+
+                    px = opens[s]
+                    if px <= 0:
+                        continue
+
+                    # Close at the bar open with slippage. Fees are charged separately.
+                    fill_px = px * (1.0 - slippage_rate) if qty > 0 else px * (1.0 + slippage_rate)
+                    # For analysis only: estimate slippage cost vs the mid (open) price.
+                    slippage_cost_est = float(abs(qty) * px * slippage_rate)
+                    bar_slippage_cost_est += float(slippage_cost_est)
+                    notional_val = abs(qty) * abs(fill_px)
+
+                    entry = entry_prices[s]
+                    realized_pnl = (fill_px - entry) * qty
+
+                    taker_fee = notional_val * fee_rate
+                    liq_fee = notional_val * LIQ_FEE
+
+                    cash += realized_pnl
+                    cash -= taker_fee
+                    cash -= liq_fee
+
+                    bar_realized_pnl += float(realized_pnl)
+                    bar_fees_paid += float(taker_fee)
+                    bar_liquidation_fee += float(liq_fee)
+
+                    trades_rows.append({
+                        "timestamp": ts.isoformat(),
+                        "symbol": s,
+                        "side": "SELL" if qty > 0 else "BUY",
+                        "qty": abs(qty),
+                        "fill_price": fill_px,
+                        "notional": notional_val,
+                        "fee_paid": taker_fee,
+                        "liq_fee_paid": liq_fee,
+                        "slippage_cost_est": slippage_cost_est,
+                        "realized_pnl": realized_pnl,
+                        "cash_after": cash,
+                        "position_qty_after": 0.0,
+                        "strategy_reason": "LIQUIDATION",
+                        "liquidation": 1,
+                    })
+
+                    position_qty[s] = 0.0
+                    entry_prices[s] = 0.0
+                    holding_bars[s] = 0
+                    current_targets[s] = 0.0
+
+                # Cancel any pending strategy intent after a liquidation event.
+                pending_target_exposures = None
+                pending_reason = None
+
+                # Equity after liquidation is just cash.
+                equity = cash
             
             # Daily stats update
             if current_day != ts.date():
@@ -204,9 +281,13 @@ def run_derivatives_backtest(
                     # Price with slippage
                     fill_px = px * (1.0 + slippage_rate) if delta_q > 0 else px * (1.0 - slippage_rate)
                     
-                    # Transaction Cost
-                    notional_val = abs(delta_q) * fill_px
-                    cost = notional_val * fee_rate # Taker fee
+                    # Transaction costs (taker fee). Slippage is embedded in fill_px; we record an
+                    # estimate for analysis.
+                    notional_val = abs(delta_q) * abs(fill_px)
+                    cost = notional_val * fee_rate  # Taker fee
+                    slippage_cost_est = abs(delta_q) * px * slippage_rate
+                    bar_slippage_cost_est += float(slippage_cost_est)
+                    bar_fees_paid += float(cost)
                     
                     # Update Cash:
                     # Logic: Cash isn't used to "buy" the asset in perps. 
@@ -258,6 +339,7 @@ def run_derivatives_backtest(
                              pnl = (avg_entry - fill_px) * close_amt
                         
                         cash += pnl
+                        bar_realized_pnl += float(pnl)
                         
                     cash -= cost
                     
@@ -292,28 +374,18 @@ def run_derivatives_backtest(
                         "qty": abs(delta_q),
                         "fill_price": fill_px,
                         "notional": notional_val,
+                        "fee_paid": cost,
+                        "liq_fee_paid": 0.0,
+                        "slippage_cost_est": slippage_cost_est,
+                        "realized_pnl": pnl if ((current_q > 0 and delta_q < 0) or (current_q < 0 and delta_q > 0)) else 0.0,
                         "cash_after": cash,
                         "position_qty_after": new_qty,
                         "strategy_reason": pending_reason,
+                        "liquidation": 0,
                     })
 
                 pending_target_exposures = None
                 pending_reason = None
-
-            # Funding accrual (cash-settled). This is a simple approximation that accrues
-            # continuously between bar timestamps using the current funding rate.
-            if i > 0:
-                dt_hours = (pd.Timestamp(idx[i]) - pd.Timestamp(idx[i - 1])).total_seconds() / 3600.0
-                if dt_hours > 0:
-                    funding_pnl = 0.0
-                    for s in symbols:
-                        qty = position_qty[s]
-                        if abs(qty) <= 1e-9:
-                            continue
-                        rate = float(current_funding_rates.get(s, 0.0) or 0.0)
-                        funding_pnl += -(qty * closes[s]) * rate * float(dt_hours)
-                    if abs(funding_pnl) > 0:
-                        cash += float(funding_pnl)
 
             # Calculate Equity for Tracking (Mark to Market at CLOSE)
             unrealized_pnl = 0.0
@@ -328,21 +400,66 @@ def run_derivatives_backtest(
                          unrealized_pnl += (entry - px) * abs(qty)
             
             equity = cash + unrealized_pnl
-            
+
+            # Update holding bars after any open-trades this bar.
+            for s in symbols:
+                end_sign = 1 if position_qty[s] > 1e-9 else (-1 if position_qty[s] < -1e-9 else 0)
+                if end_sign == 0:
+                    holding_bars[s] = 0
+                elif start_sign[s] == 0 or start_sign[s] != end_sign:
+                    holding_bars[s] = 1
+                else:
+                    holding_bars[s] += 1
+
+            # Portfolio exposures at close (analysis / risk)
+            gross_notional = 0.0
+            for s in symbols:
+                gross_notional += abs(position_qty[s] * closes[s])
+            margin_used = gross_notional * cfg.maintenance_margin_rate
+            margin_util = margin_used / equity if equity > 0 else 0.0
+            gross_leverage = gross_notional / equity if equity > 0 else 0.0
+
+            equity_change = equity - prev_equity
+            total_fees = bar_fees_paid + bar_liquidation_fee
+            price_pnl = equity_change - bar_funding_pnl + total_fees
+
+            day_pnl = equity - day_start_equity
+            day_return = day_pnl / day_start_equity if day_start_equity else 0.0
+
             # Record Equity Row
             row = {
                 "timestamp": ts.isoformat(),
                 "cash": cash,
                 "equity": equity,
+                "equity_change": equity_change,
+                "price_pnl": price_pnl,
+                "funding_pnl": bar_funding_pnl,
+                "fees_paid": bar_fees_paid,
+                "liquidation_fee": bar_liquidation_fee,
+                "slippage_cost_est": bar_slippage_cost_est,
+                "realized_pnl": bar_realized_pnl,
+                "unrealized_pnl": unrealized_pnl,
+                "gross_notional": gross_notional,
+                "gross_leverage": gross_leverage,
+                "margin_used": margin_used,
+                "margin_utilization": margin_util,
+                "liquidated": int(bar_liquidated),
                 "day_start_equity": day_start_equity,
-                "day_pnl": equity - day_start_equity,
-                "day_return": (equity - day_start_equity)/day_start_equity if day_start_equity else 0.0,
+                "day_pnl": day_pnl,
+                "day_return": day_return,
             }
             for s in symbols:
                 row[f"{s}_close"] = closes[s]
                 row[f"{s}_position_qty"] = position_qty[s]
                 row[f"{s}_holding_bars"] = holding_bars[s]
+                row[f"{s}_funding_rate"] = float(current_funding_rates.get(s, 0.0) or 0.0)
             equity_rows.append(row)
+
+            # Update "previous" trackers for the next bar
+            prev_equity = equity
+            for s in symbols:
+                prev_closes[s] = closes[s]
+                prev_funding_rates[s] = float(current_funding_rates.get(s, 0.0) or 0.0)
 
             # Progress
             if progress is not None:
@@ -367,14 +484,6 @@ def run_derivatives_backtest(
             # Strategy Step
             if i < len(idx) - 1:
                 next_ts = pd.Timestamp(idx[i+1])
-                
-                # Update holding bars
-                for s in symbols:
-                    if abs(position_qty[s]) > 1e-9:
-                        holding_bars[s] += 1
-                    else:
-                        holding_bars[s] = 0
-
                 state = StrategyState(
                     timestamp=next_ts,
                     allow_short=True, # Always allowed in perps
@@ -413,7 +522,8 @@ def run_derivatives_backtest(
     # Output generation
     trade_cols = [
         "timestamp", "symbol", "side", "qty", "fill_price", "notional",
-        "cash_after", "position_qty_after", "strategy_reason"
+        "cash_after", "position_qty_after", "strategy_reason",
+        "fee_paid", "liq_fee_paid", "slippage_cost_est", "realized_pnl", "liquidation"
     ]
     trades = pd.DataFrame(trades_rows, columns=trade_cols)
     equity_curve = pd.DataFrame(equity_rows)

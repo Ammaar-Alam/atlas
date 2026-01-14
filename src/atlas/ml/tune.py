@@ -130,10 +130,29 @@ def _perp_flare_space() -> list[Param]:
     ]
 
 
+def _orb_trend_space() -> list[Param]:
+    # Excludes environment params like slippage_bps (handled by engine/backtest config).
+    return [
+        IntRange("orb_minutes", 5, 90, log=True),
+        FloatRange("orb_breakout_bps", 1.0, 25.0, decimals=3),
+        IntRange("confirm_bars", 1, 6),
+        IntRange("atr_window", 8, 60, log=True),
+        IntRange("er_window", 5, 60, log=True),
+        FloatRange("er_min", 0.10, 0.85, decimals=3),
+        IntRange("expected_hold_bars", 4, 60, log=True),
+        FloatRange("k_cost", 0.5, 6.0, decimals=3),
+        IntRange("min_hold_bars", 1, 12),
+        FloatRange("daily_loss_limit", 0.003, 0.05, decimals=4),
+        FloatRange("kill_switch", 0.01, 0.10, decimals=4),
+    ]
+
+
 def get_search_space(strategy: str) -> list[Param]:
     strategy = (strategy or "").strip().lower().replace("-", "_")
     if strategy == "perp_flare":
         return _perp_flare_space()
+    if strategy == "orb_trend":
+        return _orb_trend_space()
     raise ValueError(f"no tuning space defined for strategy: {strategy}")
 
 
@@ -156,10 +175,39 @@ def _validate_perp_flare_params(params: dict[str, Any]) -> bool:
         return False
 
 
+def _validate_orb_trend_params(params: dict[str, Any]) -> bool:
+    try:
+        if int(params["orb_minutes"]) <= 0:
+            return False
+        if int(params["confirm_bars"]) <= 0:
+            return False
+        if int(params["atr_window"]) < 2:
+            return False
+        if int(params["er_window"]) < 2:
+            return False
+        if not (0.0 < float(params["er_min"]) <= 1.0):
+            return False
+        if int(params["expected_hold_bars"]) <= 0:
+            return False
+        if float(params["k_cost"]) < 0:
+            return False
+        if int(params["min_hold_bars"]) < 0:
+            return False
+        if not (0.0 < float(params["daily_loss_limit"]) < 1.0):
+            return False
+        if not (0.0 < float(params["kill_switch"]) < 1.0):
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def validate_params(strategy: str, params: dict[str, Any]) -> bool:
     strategy = (strategy or "").strip().lower().replace("-", "_")
     if strategy == "perp_flare":
         return _validate_perp_flare_params(params)
+    if strategy == "orb_trend":
+        return _validate_orb_trend_params(params)
     return True
 
 

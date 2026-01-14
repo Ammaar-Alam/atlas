@@ -91,7 +91,12 @@ def _densify_crypto_bars(bars: pd.DataFrame, *, minutes: int) -> pd.DataFrame:
         out[col] = out[col].ffill()
     out = out.dropna(subset=["open", "high", "low", "close"])
     out["volume"] = out["volume"].fillna(0.0)
-    return out[["open", "high", "low", "close", "volume"]].copy()
+    if "funding_rate" in out.columns:
+        out["funding_rate"] = out["funding_rate"].ffill().fillna(0.0)
+    cols = ["open", "high", "low", "close", "volume"]
+    if "funding_rate" in out.columns:
+        cols.append("funding_rate")
+    return out[cols].copy()
 
 
 def load_universe_bars(

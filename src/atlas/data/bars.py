@@ -64,15 +64,24 @@ def resample_ohlcv(
         "close": "last",
         "volume": "sum",
     }
+    # Optional columns (kept when present). Funding rates are typically stepwise; mean is a simple
+    # approximation over a larger resampled window.
+    if "funding_rate" in bars.columns:
+        agg["funding_rate"] = "mean"
     out = (
         bars.resample(rule, label="left", closed="left")
         .agg(agg)
         .dropna(subset=["open", "high", "low", "close"])
     )
     out["volume"] = out["volume"].fillna(0.0)
+    if "funding_rate" in out.columns:
+        out["funding_rate"] = out["funding_rate"].ffill().fillna(0.0)
     if drop_zero_volume:
         out = out[out["volume"] > 0]
-    return out[["open", "high", "low", "close", "volume"]].copy()
+    cols = ["open", "high", "low", "close", "volume"]
+    if "funding_rate" in out.columns:
+        cols.append("funding_rate")
+    return out[cols].copy()
 
 
 def filter_regular_hours(bars: pd.DataFrame, *, weekdays_only: bool = True) -> pd.DataFrame:
