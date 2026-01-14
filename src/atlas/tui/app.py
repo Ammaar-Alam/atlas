@@ -1890,10 +1890,30 @@ class AtlasTui(App):
             return ""
         if width <= 0:
             width = 1
+
         step = max(1, len(values) // width)
-        sampled = values[::step]
+        sampled = [float(v) for v in values[::step]]
         if len(sampled) > width:
             sampled = sampled[-width:]
+
+        # Guard against NaN/inf, which can happen when plotting sentinel scores.
+        has_finite = any(math.isfinite(v) for v in sampled)
+        if not has_finite:
+            return ""
+        last_finite: Optional[float] = None
+        for idx, v in enumerate(sampled):
+            if math.isfinite(v):
+                last_finite = v
+            elif last_finite is not None:
+                sampled[idx] = last_finite
+        try:
+            first_finite = next(v for v in sampled if math.isfinite(v))
+        except StopIteration:
+            return ""
+        for idx, v in enumerate(sampled):
+            if not math.isfinite(v):
+                sampled[idx] = first_finite
+
         lo = min(sampled)
         hi = max(sampled)
         if not (hi > lo):
@@ -2347,7 +2367,9 @@ class AtlasTui(App):
                 if progress is not None:
                     self._tune_progress = progress
                     try:
-                        self._tune_score_spark.append(float(progress.last_score))
+                        last_score = float(progress.last_score)
+                        if math.isfinite(last_score):
+                            self._tune_score_spark.append(last_score)
                     except Exception:
                         pass
 
