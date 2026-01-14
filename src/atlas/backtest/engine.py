@@ -23,6 +23,9 @@ class BacktestConfig:
     max_position_notional_usd: float
     slippage_bps: float
     allow_short: bool
+    taker_fee_bps: float = 3.0
+    maintenance_margin_rate: float = 0.05
+    liquidation_fee_rate: float = 0.01
 
 
 @dataclass(frozen=True)
@@ -257,6 +260,11 @@ def run_backtest(
                 day_pnl=float(day_pnl),
                 day_return=float(day_return),
                 holding_bars={s: int(holding_bars[s]) for s in symbols},
+                extra={
+                    "max_position_notional_usd": float(cfg.max_position_notional_usd),
+                    "slippage_bps": float(cfg.slippage_bps),
+                    "taker_fee_bps": float(cfg.taker_fee_bps),
+                },
             )
             history = {s: bars_by_symbol[s].iloc[: i + 1] for s in symbols}
             decision = strategy.target_exposures(history, state)

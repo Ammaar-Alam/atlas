@@ -411,7 +411,7 @@ def tune(
     ),
     improvement_margin: float = typer.Option(
         0.0,
-        help="Require selected params to beat incumbent validation score by this margin; otherwise keep incumbent.",
+        help="Require selected params to beat the incumbent selection score by this margin; otherwise keep incumbent.",
     ),
     out: Optional[Path] = typer.Option(
         None, help="Optional path to write best params JSON (strategy-keyed)."
@@ -503,7 +503,9 @@ def tune(
     table.add_row("segments", str(len(result.selections)))
     table.add_row("elapsed", f"{elapsed_s:.2f}s")
     table.add_row("best_params_latest", json.dumps(result.best_params_latest, sort_keys=True))
+    table.add_row("best_params_stable", json.dumps(result.best_params_stable, sort_keys=True))
     table.add_row("best_params_file", str(run_dir / "best_params.json"))
+    table.add_row("best_params_stable_file", str(run_dir / "best_params_stable.json"))
     if out is not None:
         table.add_row("out", str(out))
     Console().print(table)

@@ -149,6 +149,7 @@ atlas tune --market derivatives --symbol BTC-PERP --data-source coinbase --bar-t
 The run directory includes:
 
 - `best_params.json` (strategy-keyed params usable via `--strategy-params`)
+- `best_params_stable.json` (strategy-keyed, stability-biased params; median of recent segments)
 - `selections.json` (chosen params per segment)
 - `stability.json` (stability summary across segments)
 
@@ -169,5 +170,6 @@ More details: `STRATEGY.md:1`
 
 - Strategy sees bars up to the current bar close
 - Orders (when the target exposure changes) fill at the next bar open
-- No commissions/fees
+- Equities/spot: no commissions/fees (today)
+- Derivatives: taker fees and liquidation/funding adjustments are modeled (funding requires `funding_rate` data)
 - Optional slippage via `--slippage-bps`

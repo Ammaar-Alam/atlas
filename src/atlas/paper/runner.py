@@ -382,6 +382,9 @@ def run_paper_loop(
                 day_pnl=day_pnl,
                 day_return=day_return,
                 holding_bars={s: int(holding_bars[s]) for s in cfg_symbols},
+                extra={
+                    "max_position_notional_usd": float(cfg.max_position_notional_usd),
+                },
             )
             decision = strategy.target_exposures(bars_by_symbol, state)
             targets = {s: float(decision.target_exposures.get(s, 0.0)) for s in cfg_symbols}

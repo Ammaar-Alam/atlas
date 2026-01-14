@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import queue
 import time
@@ -434,6 +435,14 @@ class AtlasTui(App):
         self._tune_run_dir: Optional[Path] = None
         self._tune_started_at: Optional[float] = None
         self._tune_last_result_dir: Optional[Path] = None
+        self._tune_score_spark: deque[float] = deque(maxlen=120)
+        self._tune_best_score_spark: deque[float] = deque(maxlen=120)
+        self._tune_recent_trials: deque[tuple[int, int, float, bool, str]] = deque(maxlen=12)
+        self._tune_trial_total: int = 0
+        self._tune_trial_rejected: int = 0
+        self._tune_segment_index: int = -1
+        self._tune_segment_trial_total: int = 0
+        self._tune_segment_trial_rejected: int = 0
         self._last_run_dir: Optional[Path] = None
         self._last_live_decision_ts: Optional[str] = None
         self._suggestion_matches: list[str] = []
@@ -2098,41 +2107,224 @@ class AtlasTui(App):
 
     def _render_tune_live(self) -> None:
         results = self.query_one("#results", Static)
-        results.border_title = "Tune (live)"
+        results.border_title = "Tune (running)"
 
-        table = Table(show_header=False, box=box.SIMPLE)
-        table.add_column("k", style="bold")
-        table.add_column("v")
-
-        table.add_row("run_dir", str(self._tune_run_dir) if self._tune_run_dir else "-")
-        table.add_row("status", self._tune_status or "-")
+        status = self._tune_status or "running…"
+        run_dir = self._tune_run_dir
+        started_at = self._tune_started_at or time.monotonic()
+        elapsed_s = max(time.monotonic() - started_at, 0.0)
 
         progress = self._tune_progress
+        segment_label = "-"
+        trial_label = "-"
+        phase_label = "-"
+        best_score_text = "-"
+        last_score_text = "-"
+        best_style = "cyan"
+        last_style = "cyan"
+        verdict_text = "-"
+        verdict_style = "cyan"
+        last_kpi_title = "Last"
+        bar = self._progress_bar(0.0, width=28)
+        pct = 0.0
+        done_trials = 0
+        total_trials = 0
+        eta_text = "-"
+        params_text = "-"
+
         if progress is not None:
-            table.add_row(
-                "segment",
-                f"{int(progress.segment) + 1}/{int(progress.n_segments)}",
+            seg_idx = int(progress.segment)
+            seg_total = max(int(progress.n_segments), 0)
+            trials_per_seg = max(int(progress.trials_per_segment), 0)
+            trial_idx = int(progress.trial)
+
+            segment_label = (
+                f"{seg_idx + 1}/{seg_total}" if seg_total > 0 else f"{seg_idx + 1}/-"
             )
-            table.add_row(
-                "trial",
-                f"{int(progress.trial)}/{int(progress.trials_per_segment)}",
+            trial_label = (
+                f"{trial_idx}/{trials_per_seg}" if trials_per_seg > 0 else f"{trial_idx}/-"
             )
-            table.add_row("best_score", f"{float(progress.best_selection_score):.6g}")
-            table.add_row("last_score", f"{float(progress.last_score):.6g}")
+            phase_label = str(progress.phase or "-")
+            if str(progress.phase) == "segment_done":
+                last_kpi_title = "Test"
+
+            total_trials = max(seg_total * trials_per_seg, 0)
+            done_trials = max(seg_idx * trials_per_seg + trial_idx, 0)
+            pct = float(done_trials) / float(total_trials) if total_trials > 0 else 0.0
+            bar = self._progress_bar(pct, width=28)
+
+            rate = float(done_trials) / elapsed_s if elapsed_s > 0 else 0.0
+            eta_s = float(total_trials - done_trials) / rate if rate > 0 else 0.0
+            eta_text = "-" if eta_s <= 0 else f"{eta_s/60.0:.1f}m"
+
+            best_score = float(progress.best_selection_score)
+            last_score = float(progress.last_score)
+
+            if math.isfinite(best_score):
+                best_score_text = f"{best_score:.6g}"
+                best_style = "green" if best_score >= 0 else "red"
+            else:
+                best_style = "cyan"
+
+            if math.isfinite(last_score):
+                last_score_text = f"{last_score:.6g}"
+            else:
+                last_score_text = "-"
             if progress.last_rejected:
-                table.add_row(
-                    "last_reject",
-                    Text(str(progress.last_reject_reason or "rejected"), style="red"),
-                )
+                last_style = "red"
+                verdict_text = "rejected"
+                verdict_style = "red"
+            else:
+                verdict_text = "accepted"
+                verdict_style = "green"
+                if not math.isfinite(last_score):
+                    last_style = "cyan"
+                else:
+                    last_style = "green" if last_score >= 0 else "yellow"
 
             strategy = self._canonicalize_strategy_name(self.state.strategy)
             if progress.best_params:
-                table.add_row(
-                    "best_params",
-                    self._format_strategy_params(strategy, progress.best_params),
+                params_text = self._format_strategy_params(strategy, progress.best_params)
+
+        kpis = Table.grid(expand=True)
+        kpis.add_column(ratio=1)
+        kpis.add_column(ratio=1)
+        kpis.add_column(ratio=1)
+        kpis.add_column(ratio=1)
+        kpis.add_row(
+            Panel(
+                Align.center(Text(segment_label, style="bold cyan")),
+                title="Segment",
+                border_style="cyan",
+                box=box.ROUNDED,
+                padding=(0, 1),
+            ),
+            Panel(
+                Align.center(Text(trial_label, style="bold cyan")),
+                title="Trial",
+                border_style="cyan",
+                box=box.ROUNDED,
+                padding=(0, 1),
+            ),
+            Panel(
+                Align.center(Text(best_score_text, style=f"bold {best_style}")),
+                title="Best (seg)",
+                border_style=best_style,
+                box=box.ROUNDED,
+                padding=(0, 1),
+            ),
+            Panel(
+                Align.center(Text(last_score_text, style=f"bold {last_style}")),
+                title=last_kpi_title,
+                border_style=last_style,
+                box=box.ROUNDED,
+                padding=(0, 1),
+            ),
+        )
+
+        meta = Table(show_header=False, box=box.SIMPLE)
+        meta.add_column("k", style="bold")
+        meta.add_column("v")
+        meta.add_row("status", status)
+        meta.add_row("phase", phase_label)
+        progress_suffix = (
+            f"({done_trials}/{total_trials})" if total_trials > 0 else "(-/-)"
+        )
+        meta.add_row("progress", f"{bar}  {pct*100:5.1f}%  {progress_suffix}")
+        meta.add_row("elapsed", f"{elapsed_s:.1f}s  eta≈{eta_text}")
+        if run_dir is not None:
+            meta.add_row("run_dir", str(run_dir))
+
+        if self._tune_trial_total > 0:
+            accepted = int(self._tune_trial_total - self._tune_trial_rejected)
+            meta.add_row(
+                "accept_rate",
+                f"{accepted}/{self._tune_trial_total} ({accepted/float(self._tune_trial_total):.1%})",
+            )
+
+        if self._tune_segment_trial_total > 0:
+            seg_accepted = int(self._tune_segment_trial_total - self._tune_segment_trial_rejected)
+            meta.add_row(
+                "segment_accept",
+                f"{seg_accepted}/{self._tune_segment_trial_total} ({seg_accepted/float(self._tune_segment_trial_total):.1%})",
+            )
+
+        if progress is not None:
+            meta.add_row("last_verdict", Text(verdict_text, style=f"bold {verdict_style}"))
+            if progress.last_rejected:
+                meta.add_row(
+                    "reject_reason",
+                    Text(str(progress.last_reject_reason or "-"), style="red"),
                 )
 
-        results.update(Panel(table, title="Tune", border_style="cyan", box=box.ROUNDED))
+        recent = Table(box=box.SIMPLE, show_header=True, header_style="bold")
+        recent.add_column("seg", justify="right")
+        recent.add_column("trial", justify="right")
+        recent.add_column("score", justify="right")
+        recent.add_column("verdict", no_wrap=True)
+        recent.add_column("reason")
+
+        if not self._tune_recent_trials:
+            recent.add_row("-", "-", "-", "-", "-")
+        else:
+            for seg_i, trial_i, score, rejected, reason in list(self._tune_recent_trials)[-8:]:
+                verdict = "rejected" if rejected else "accepted"
+                verdict_s = "red" if rejected else "green"
+                reason_text = str(reason or "-")
+                if len(reason_text) > 64:
+                    reason_text = reason_text[:61] + "..."
+                score_text = f"{float(score):.6g}" if math.isfinite(float(score)) else "-"
+                recent.add_row(
+                    str(int(seg_i) + 1),
+                    str(int(trial_i)),
+                    Text(score_text, style=f"bold {verdict_s}"),
+                    Text(verdict, style=f"bold {verdict_s}"),
+                    Text(reason_text, style="red") if rejected else Text("-", style="dim"),
+                )
+
+        best_spark_values = list(self._tune_best_score_spark)
+        last_spark_values = list(self._tune_score_spark)
+        best_spark = self._sparkline(best_spark_values, width=80)
+        last_spark = self._sparkline(last_spark_values, width=80)
+        best_spark_style = (
+            "green"
+            if len(best_spark_values) >= 2 and best_spark_values[-1] >= best_spark_values[0]
+            else "red"
+        )
+        last_spark_style = (
+            "green"
+            if len(last_spark_values) >= 2 and last_spark_values[-1] >= last_spark_values[0]
+            else "red"
+        )
+
+        score_table = Table(show_header=False, box=box.SIMPLE)
+        score_table.add_column("k", style="bold", no_wrap=True)
+        score_table.add_column("v")
+        score_table.add_row("best(seg)", Text(best_spark or "-", style=best_spark_style))
+        score_table.add_row("last", Text(last_spark or "-", style=last_spark_style))
+
+        activity = Group(
+            recent,
+            "",
+            score_table,
+        )
+
+        results.update(
+            Group(
+                kpis,
+                "",
+                Panel(meta, title="Progress", border_style="cyan", box=box.ROUNDED),
+                "",
+                Panel(
+                    Text(params_text or "-", style=""),
+                    title="Best Params (segment)",
+                    border_style="magenta",
+                    box=box.ROUNDED,
+                ),
+                "",
+                Panel(activity, title="Search (recent)", border_style="yellow", box=box.ROUNDED),
+            )
+        )
 
     def _refresh_tune_view(self) -> None:
         if self._tune_thread is None:
@@ -2154,6 +2346,44 @@ class AtlasTui(App):
                 progress = payload if isinstance(payload, TuneProgress) else None
                 if progress is not None:
                     self._tune_progress = progress
+                    try:
+                        self._tune_score_spark.append(float(progress.last_score))
+                    except Exception:
+                        pass
+
+                    if str(progress.phase) == "search":
+                        seg_idx = int(progress.segment)
+                        if seg_idx != int(self._tune_segment_index):
+                            self._tune_segment_index = seg_idx
+                            self._tune_segment_trial_total = 0
+                            self._tune_segment_trial_rejected = 0
+                            self._tune_best_score_spark.clear()
+
+                        self._tune_trial_total += 1
+                        self._tune_segment_trial_total += 1
+                        if bool(progress.last_rejected):
+                            self._tune_trial_rejected += 1
+                            self._tune_segment_trial_rejected += 1
+
+                        try:
+                            best_score = float(progress.best_selection_score)
+                            if math.isfinite(best_score):
+                                self._tune_best_score_spark.append(best_score)
+                        except Exception:
+                            pass
+
+                        try:
+                            self._tune_recent_trials.append(
+                                (
+                                    int(progress.segment),
+                                    int(progress.trial),
+                                    float(progress.last_score),
+                                    bool(progress.last_rejected),
+                                    str(progress.last_reject_reason or ""),
+                                )
+                            )
+                        except Exception:
+                            pass
                     updated = True
                 continue
 
@@ -2219,6 +2449,14 @@ class AtlasTui(App):
         self._tune_status = "preparing…"
         self._tune_progress = None
         self._tune_last_result_dir = None
+        self._tune_score_spark.clear()
+        self._tune_best_score_spark.clear()
+        self._tune_recent_trials.clear()
+        self._tune_trial_total = 0
+        self._tune_trial_rejected = 0
+        self._tune_segment_index = -1
+        self._tune_segment_trial_total = 0
+        self._tune_segment_trial_rejected = 0
 
         while True:
             try:
@@ -2375,8 +2613,13 @@ class AtlasTui(App):
                         "best_params_latest",
                         self._format_strategy_params(strategy, result.best_params_latest),
                     )
+                    summary.add_row(
+                        "best_params_stable",
+                        self._format_strategy_params(strategy, result.best_params_stable),
+                    )
                     summary.add_row("apply", "run /tune apply to copy tuned params into settings")
                 summary.add_row("best_params_file", str(run_dir / "best_params.json"))
+                summary.add_row("best_params_stable_file", str(run_dir / "best_params_stable.json"))
                 summary.add_row("stability_file", str(run_dir / "stability.json"))
 
                 self._tune_events.put(("done", (run_dir, summary, result)))

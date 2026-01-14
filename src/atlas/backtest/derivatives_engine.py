@@ -18,8 +18,6 @@ from atlas.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
-# Constants
-TAKER_FEE_BPS = 3.0  # Default 3bps taker
 FUNDING_INTERVAL_HOURS = 1  # Approximate accumulation. Real CEX settle every 4h or 8h. 
 # We will model funding as continuous accrual or per-bar check if needed.
 # For simplicity in this engine: We won't simulate exact 8h timestamps unless critical.
@@ -85,7 +83,7 @@ def run_derivatives_backtest(
     # Config
     max_notional_cap = float(cfg.max_position_notional_usd)
     slippage_rate = float(cfg.slippage_bps) / 10_000.0
-    fee_rate = TAKER_FEE_BPS / 10_000.0
+    fee_rate = float(cfg.taker_fee_bps) / 10_000.0
 
     trades_rows: list[dict] = []
     equity_rows: list[dict] = []
@@ -97,14 +95,23 @@ def run_derivatives_backtest(
     last_progress_t = 0.0
 
     # Liquidation Params
-    MAINTENANCE_MARGIN = 0.05 # 5%
-    LIQ_FEE = 0.01 # 1% penalty
+    MAINTENANCE_MARGIN = float(cfg.maintenance_margin_rate)
+    LIQ_FEE = float(cfg.liquidation_fee_rate)
 
     with decisions_jsonl.open("w") as f_decisions:
         for i in range(len(idx)):
             ts = pd.Timestamp(idx[i])
             opens = {s: float(bars_by_symbol[s]["open"].iloc[i]) for s in symbols}
             closes = {s: float(bars_by_symbol[s]["close"].iloc[i]) for s in symbols}
+
+            # Optional funding rate support: if the bars include a per-symbol column named
+            # "funding_rate", treat it as an hourly funding rate (e.g. 0.0001 == 1bp/hour).
+            for s in symbols:
+                if "funding_rate" in bars_by_symbol[s].columns:
+                    try:
+                        current_funding_rates[s] = float(bars_by_symbol[s]["funding_rate"].iloc[i])
+                    except Exception:
+                        current_funding_rates[s] = 0.0
 
             # Mark to Market Equity
             # Equity = Cash + Unrealized PnL
@@ -293,6 +300,21 @@ def run_derivatives_backtest(
                 pending_target_exposures = None
                 pending_reason = None
 
+            # Funding accrual (cash-settled). This is a simple approximation that accrues
+            # continuously between bar timestamps using the current funding rate.
+            if i > 0:
+                dt_hours = (pd.Timestamp(idx[i]) - pd.Timestamp(idx[i - 1])).total_seconds() / 3600.0
+                if dt_hours > 0:
+                    funding_pnl = 0.0
+                    for s in symbols:
+                        qty = position_qty[s]
+                        if abs(qty) <= 1e-9:
+                            continue
+                        rate = float(current_funding_rates.get(s, 0.0) or 0.0)
+                        funding_pnl += -(qty * closes[s]) * rate * float(dt_hours)
+                    if abs(funding_pnl) > 0:
+                        cash += float(funding_pnl)
+
             # Calculate Equity for Tracking (Mark to Market at CLOSE)
             unrealized_pnl = 0.0
             for s in symbols:
@@ -363,7 +385,13 @@ def run_derivatives_backtest(
                     day_pnl=row["day_pnl"],
                     day_return=row["day_return"],
                     holding_bars={s: holding_bars[s] for s in symbols},
-                    extra={"funding_rates": current_funding_rates}
+                    extra={
+                        "max_position_notional_usd": float(cfg.max_position_notional_usd),
+                        "slippage_bps": float(cfg.slippage_bps),
+                        "taker_fee_bps": float(cfg.taker_fee_bps),
+                        "maintenance_margin_rate": float(cfg.maintenance_margin_rate),
+                        "funding_rates": current_funding_rates,
+                    },
                 )
                 
                 # Slice history and run
