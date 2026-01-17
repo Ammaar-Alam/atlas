@@ -4,12 +4,12 @@
     <strong>Quantitative Trading Research Platform</strong>
   </p>
   <p align="center">
-    Intraday algorithmic trading scaffold for US equities and crypto derivatives with paper trading, walk-forward optimization, and a full-featured terminal UI
+    Intraday algorithmic trading scaffold for US equities and crypto derivatives with paper trading, walk-forward optimization, and a full-featured terminal UI <br><i>(AI-Generated README/Documentation)</i>
   </p>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/tui-backtest-running.png" alt="Atlas TUI - Live Backtest" width="800"/>
+  <img src="docs/screenshots/tui-backtest-running.png" alt="Atlas TUI - Live Backtest"/>
 </p>
 
 <p align="center">
@@ -25,7 +25,9 @@
 
 ## What is Atlas?
 
-Atlas is a **research-grade quantitative trading platform** designed for developing, backtesting, and paper-trading intraday strategies across multiple asset classes. Built with a safety-first philosophy, Atlas defaults to paper trading mode and provides comprehensive risk controls including daily loss limits, drawdown kill-switches, and liquidation buffers.
+Atlas is a **quantitative trading platform** designed for developing, backtesting, and paper-trading intraday strategies across multiple asset classes, which I made because I was bored :D. Built with a safety-first philosophy, Atlas defaults to paper trading mode and provides comprehensive risk controls including daily loss limits, drawdown kill-switches, and liquidation buffers. 
+
+Mainly used for me to play around with and test different quant-algorithms I design when bored.
 
 The platform supports:
 - **US Equities** (SPY, QQQ, individual stocks) via Alpaca
