@@ -3170,6 +3170,7 @@ class AtlasTui(App):
                             f"total_return={float(metrics['total_return']):.4%}",
                             f"max_drawdown={float(metrics['max_drawdown']):.4%}",
                             f"sharpe={float(metrics['sharpe']):.2f}",
+                            f"sharpe_daily={float(metrics.get('sharpe_daily', 0.0)):.2f}",
                             f"fills={int(metrics['trades'])}",
                             f"gross_notional={gross_notional:.2f}",
                         ]
@@ -3346,6 +3347,7 @@ class AtlasTui(App):
                     f"total_return={metrics['total_return']:.4%}",
                     f"max_drawdown={metrics['max_drawdown']:.4%}",
                     f"sharpe={metrics['sharpe']:.2f}",
+                    f"sharpe_daily={float(metrics.get('sharpe_daily', 0.0)):.2f}",
                     f"fills={metrics['trades']}",
                     f"gross_notional={gross_notional:.2f}",
                 ]
