@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/tui-backtest-running.png" alt="Atlas TUI - Live Backtest" width="800"/>
+  <img src="docs/screenshots/tui-backtest-running.png" alt="Atlas TUI - Live Backtest"/>
 </p>
 
 <p align="center">
