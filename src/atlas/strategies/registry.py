@@ -16,6 +16,9 @@ from atlas.strategies.orb_trend import OrbTrend
 from atlas.strategies.spy_open_close import SpyOpenClose
 from atlas.strategies.perp_flare import PerpFlare
 from atlas.strategies.perp_hawk import PerpHawk
+from atlas.strategies.perp_scalp import PerpScalp
+from atlas.strategies.basis_carry import BasisCarry
+from atlas.strategies.hedge_implementation import HedgeImplementation
 
 
 @dataclass(frozen=True)
@@ -279,6 +282,197 @@ def build_strategy(
             cooldown_bars=_get_int("cooldown_bars", 5),
         )
 
+    if name in {"perp_scalp", "perp-scalp"}:
+        universe_symbols = [s.strip().upper() for s in symbols if s.strip()]
+        if not universe_symbols:
+            raise ValueError("perp_scalp requires at least 1 symbol")
+
+        def _get_int(key: str, default: int) -> int:
+            raw = params.get(key, params.get(key.lower(), default))
+            return int(raw)
+
+        def _get_float(key: str, default: float) -> float:
+            raw = params.get(key, params.get(key.lower(), default))
+            return float(raw)
+
+        def _get_opt_float(key: str, default: Optional[float]) -> Optional[float]:
+            raw = params.get(key, params.get(key.lower(), default))
+            if raw is None:
+                return default
+            return float(raw)
+
+        def _get_str(key: str, default: str) -> str:
+            raw = params.get(key, params.get(key.lower(), default))
+            return str(raw)
+
+        return PerpScalp(
+            symbols=tuple(universe_symbols),
+            atr_window=_get_int("atr_window", 14),
+            ema_fast=_get_int("ema_fast", 8),
+            ema_slow=_get_int("ema_slow", 21),
+            er_window=_get_int("er_window", 10),
+            breakout_window=_get_int("breakout_window", 8),
+            breakout_buffer_bps=_get_float("breakout_buffer_bps", 1.0),
+            er_min=_get_float("er_min", 0.25),
+            trend_z_min=_get_float("trend_z_min", 0.15),
+            min_atr_bps=_get_float("min_atr_bps", 8.0),
+            edge_floor_bps=_get_float("edge_floor_bps", 3.0),
+            k_cost=_get_float("k_cost", 1.5),
+            taker_fee_bps=_get_float("taker_fee_bps", 3.0),
+            slippage_bps=_get_float("slippage_bps", 1.5),
+            funding_entry_bps_per_day=_get_float("funding_entry_bps_per_day", 40.0),
+            funding_exit_bps_per_day=_get_float("funding_exit_bps_per_day", 80.0),
+            risk_per_trade=_get_float("risk_per_trade", 0.005),
+            stop_atr_mult=_get_float("stop_atr_mult", 1.2),
+            trail_atr_mult=_get_float("trail_atr_mult", 1.8),
+            take_profit_atr_mult=_get_float("take_profit_atr_mult", 1.5),
+            max_hold_bars=_get_int("max_hold_bars", 12),
+            min_hold_bars=_get_int("min_hold_bars", 2),
+            flip_confirm_bars=_get_int("flip_confirm_bars", 2),
+            cooldown_bars=_get_int("cooldown_bars", 4),
+            sizing_mode=_get_str("sizing_mode", "risk"),
+            target_leverage=_get_opt_float("target_leverage", None),
+            max_leverage=_get_float("max_leverage", 5.0),
+            max_margin_utilization=_get_float("max_margin_utilization", 0.40),
+            maintenance_margin_rate=_get_float("maintenance_margin_rate", 0.05),
+            min_liq_buffer_atr=_get_float("min_liq_buffer_atr", 2.5),
+            daily_loss_limit=_get_float("daily_loss_limit", 0.02),
+            kill_switch=_get_float("kill_switch", 0.10),
+        )
+
+    if name in {"basis_carry", "basis-carry", "cash_and_carry", "cash-and-carry"}:
+        universe_symbols = [s.strip().upper() for s in symbols if s.strip()]
+        if len(universe_symbols) < 2:
+            raise ValueError("basis_carry requires 2 symbols (spot, perp)")
+
+        pair = universe_symbols[:2]
+
+        def _is_perp(sym: str) -> bool:
+            s = (sym or "").strip().upper()
+            return s.endswith("-PERP") or s.endswith("-CDE")
+
+        spot_symbol = pair[0]
+        perp_symbol = pair[1]
+        if _is_perp(pair[0]) and not _is_perp(pair[1]):
+            spot_symbol = pair[1]
+            perp_symbol = pair[0]
+        elif _is_perp(pair[1]) and not _is_perp(pair[0]):
+            spot_symbol = pair[0]
+            perp_symbol = pair[1]
+
+        def _get_int(key: str, default: int) -> int:
+            raw = params.get(key, params.get(key.lower(), default))
+            return int(raw)
+
+        def _get_float(key: str, default: float) -> float:
+            raw = params.get(key, params.get(key.lower(), default))
+            return float(raw)
+
+        def _get_bool(key: str, default: bool) -> bool:
+            raw = params.get(key, params.get(key.lower(), default))
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, (int, float)):
+                return bool(int(raw))
+            if isinstance(raw, str):
+                return raw.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+            return bool(default)
+
+        return BasisCarry(
+            spot_symbol=spot_symbol,
+            perp_symbol=perp_symbol,
+            funding_ema_alpha=_get_float("funding_ema_alpha", 0.20),
+            funding_entry_bps_per_day=_get_float("funding_entry_bps_per_day", 10.0),
+            funding_exit_bps_per_day=_get_float("funding_exit_bps_per_day", 0.0),
+            edge_horizon_hours=_get_float("edge_horizon_hours", 8.0),
+            min_basis_bps=_get_float("min_basis_bps", 5.0),
+            min_basis_exit_bps=_get_float("min_basis_exit_bps", 0.0),
+            basis_mean_bps=_get_float("basis_mean_bps", 0.0),
+            basis_halflife_hours=_get_float("basis_halflife_hours", 24.0),
+            basis_momentum_window_bars=_get_int("basis_momentum_window_bars", 30),
+            max_basis_widening_bps_per_hour=_get_float("max_basis_widening_bps_per_hour", 10.0),
+            basis_vol_window_bars=_get_int("basis_vol_window_bars", 120),
+            lambda_basis_vol=_get_float("lambda_basis_vol", 1.0),
+            edge_saturation_bps=_get_float("edge_saturation_bps", 50.0),
+            collateral_buffer_frac=_get_float("collateral_buffer_frac", 0.10),
+            z_sigma_daily=_get_float("z_sigma_daily", 3.0),
+            spot_vol_window_bars=_get_int("spot_vol_window_bars", 120),
+            max_leverage=_get_float("max_leverage", 3.0),
+            max_margin_utilization=_get_float("max_margin_utilization", 0.50),
+            maintenance_margin_rate=_get_float("maintenance_margin_rate", 0.05),
+            rebalance_drift_frac=_get_float("rebalance_drift_frac", 0.02),
+            rebalance_min_notional_usd=_get_float("rebalance_min_notional_usd", 100.0),
+            min_trade_notional_usd=_get_float("min_trade_notional_usd", 200.0),
+            allow_reverse=_get_bool("allow_reverse", False),
+            require_funding_rate=_get_bool("require_funding_rate", False),
+        )
+
+    if name in {"hedge_implementation", "hedge-implementation", "hedge_impl", "hedge-impl", "hedge"}:
+        universe_symbols = [s.strip().upper() for s in symbols if s.strip()]
+        if len(universe_symbols) < 2:
+            raise ValueError("hedge requires 2 symbols (spot, perp)")
+
+        pair = universe_symbols[:2]
+
+        def _is_perp(sym: str) -> bool:
+            s = (sym or "").strip().upper()
+            return s.endswith("-PERP") or s.endswith("-CDE")
+
+        spot_symbol = pair[0]
+        perp_symbol = pair[1]
+        if _is_perp(pair[0]) and not _is_perp(pair[1]):
+            spot_symbol = pair[1]
+            perp_symbol = pair[0]
+        elif _is_perp(pair[1]) and not _is_perp(pair[0]):
+            spot_symbol = pair[0]
+            perp_symbol = pair[1]
+
+        def _get_int(key: str, default: int) -> int:
+            raw = params.get(key, params.get(key.lower(), default))
+            return int(raw)
+
+        def _get_float(key: str, default: float) -> float:
+            raw = params.get(key, params.get(key.lower(), default))
+            return float(raw)
+
+        def _get_bool(key: str, default: bool) -> bool:
+            raw = params.get(key, params.get(key.lower(), default))
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, (int, float)):
+                return bool(int(raw))
+            if isinstance(raw, str):
+                return raw.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+            return bool(default)
+
+        return HedgeImplementation(
+            spot_symbol=spot_symbol,
+            perp_symbol=perp_symbol,
+            edge_horizon_hours=_get_float("edge_horizon_hours", 8.0),
+            funding_ema_alpha=_get_float("funding_ema_alpha", 0.20),
+            basis_halflife_hours=_get_float("basis_halflife_hours", 24.0),
+            theta_intercept_bps=_get_float("theta_intercept_bps", 0.0),
+            theta_funding_beta=_get_float("theta_funding_beta", 0.25),
+            include_expected_rebalance_costs=_get_bool("include_expected_rebalance_costs", True),
+            cov_window_bars=_get_int("cov_window_bars", 240),
+            rebalance_delta_max=_get_float("rebalance_delta_max", 0.02),
+            rebalance_turnover_frac_per_unit_delta=_get_float(
+                "rebalance_turnover_frac_per_unit_delta", 0.50
+            ),
+            spot_financing_rate_per_hour=_get_float("spot_financing_rate_per_hour", 0.0),
+            z_risk=_get_float("z_risk", 1.0),
+            lambda_risk=_get_float("lambda_risk", 8.0),
+            z_liq=_get_float("z_liq", 2.33),
+            collateral_buffer_frac=_get_float("collateral_buffer_frac", 0.10),
+            max_leverage=_get_float("max_leverage", 3.0),
+            max_margin_utilization=_get_float("max_margin_utilization", 0.50),
+            maintenance_margin_rate=_get_float("maintenance_margin_rate", 0.05),
+            min_trade_notional_usd=_get_float("min_trade_notional_usd", 200.0),
+            rebalance_min_notional_usd=_get_float("rebalance_min_notional_usd", 100.0),
+            flip_hysteresis_bps=_get_float("flip_hysteresis_bps", 2.0),
+            require_funding_rate=_get_bool("require_funding_rate", False),
+        )
+
     raise ValueError(f"unknown strategy: {name}")
 
 
@@ -293,4 +487,7 @@ def list_strategy_names() -> list[str]:
         "orb_trend",
         "perp_flare",
         "perp_hawk",
+        "perp_scalp",
+        "hedge",
+        "basis_carry",
     ]

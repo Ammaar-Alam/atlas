@@ -268,6 +268,10 @@ def backtest(
         0.005,
         help="Derivatives only: additional liquidation fee rate (e.g. 0.005 = 0.5%)",
     ),
+    debug: bool = typer.Option(
+        False,
+        help="Write extra debug JSONL (decision snapshots + trade_debug.jsonl) under the run_dir.",
+    ),
     allow_short: bool = typer.Option(False, help="Allow negative exposure"),
 ) -> None:
     run_dir = Path("outputs") / "backtests" / _run_id("backtest")
@@ -289,11 +293,14 @@ def backtest(
     if symbols is not None:
         raw_symbols = [s.strip() for s in (symbols or "").split(",") if s.strip()]
     else:
-        raw_symbols = (
-            default_symbols(mkt, count=2)
-            if canonical_strategy in {"nec_x", "nec_pdt"}
-            else [symbol.strip()]
-        )
+        if canonical_strategy in {"basis_carry", "hedge"} and mkt in {Market.CRYPTO, Market.DERIVATIVES}:
+            raw_symbols = ["BTC/USD", "BTC-PERP"]
+        else:
+            raw_symbols = (
+                default_symbols(mkt, count=2)
+                if canonical_strategy in {"nec_x", "nec_pdt", "basis_carry", "hedge"}
+                else [symbol.strip()]
+            )
     universe_symbols = coerce_symbols_for_market(raw_symbols, mkt)
 
     alpaca_settings = get_alpaca_settings(require_keys=True) if data_source == "alpaca" else None
@@ -359,9 +366,16 @@ def backtest(
             strategy=strat,
             cfg=cfg,
             run_dir=run_dir,
+            debug=debug,
         )
     else:
-        run_backtest(bars_by_symbol=universe.bars_by_symbol, strategy=strat, cfg=cfg, run_dir=run_dir)
+        run_backtest(
+            bars_by_symbol=universe.bars_by_symbol,
+            strategy=strat,
+            cfg=cfg,
+            run_dir=run_dir,
+            debug=debug,
+        )
     elapsed_s = time.perf_counter() - t0
 
     if strategy_params is not None:

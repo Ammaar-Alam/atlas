@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -31,6 +32,7 @@ def run_derivatives_backtest(
     run_dir: Path,
     progress: Optional[Callable[[BacktestProgress], None]] = None,
     progress_interval_s: float = 0.25,
+    debug: bool = False,
 ) -> BacktestOutputs:
     """
     Derivatives-specific backtest engine.
@@ -42,6 +44,7 @@ def run_derivatives_backtest(
     """
     run_dir.mkdir(parents=True, exist_ok=True)
     decisions_jsonl = run_dir / "decisions.jsonl"
+    trade_debug_jsonl = run_dir / "trade_debug.jsonl"
 
     cash = float(cfg.initial_cash)
     symbols = [s.strip().upper() for s in cfg.symbols if s.strip()]
@@ -91,6 +94,7 @@ def run_derivatives_backtest(
 
     pending_target_exposures: Optional[dict[str, float]] = None
     pending_reason: Optional[str] = None
+    pending_decision_context: Optional[dict[str, Any]] = None
     
     # Config
     max_notional_cap = float(cfg.max_position_notional_usd)
@@ -111,11 +115,31 @@ def run_derivatives_backtest(
     MAINTENANCE_MARGIN = float(cfg.maintenance_margin_rate)
     LIQ_FEE = float(cfg.liquidation_fee_rate)
 
-    with decisions_jsonl.open("w") as f_decisions:
+    def _bar_snapshot(df: pd.DataFrame, *, row_i: int) -> dict[str, float]:
+        cols = ["open", "high", "low", "close", "volume", "funding_rate"]
+        out: dict[str, float] = {}
+        for col in cols:
+            if col not in df.columns:
+                continue
+            try:
+                out[col] = float(df[col].iloc[row_i])
+            except Exception:
+                continue
+        return out
+
+    with ExitStack() as stack:
+        f_decisions = stack.enter_context(decisions_jsonl.open("w"))
+        f_trade_debug = stack.enter_context(trade_debug_jsonl.open("w")) if debug else None
+
         for i in range(len(idx)):
             ts = pd.Timestamp(idx[i])
             opens = {s: float(bars_by_symbol[s]["open"].iloc[i]) for s in symbols}
             closes = {s: float(bars_by_symbol[s]["close"].iloc[i]) for s in symbols}
+            execution_bars = (
+                {s: _bar_snapshot(bars_by_symbol[s], row_i=i) for s in symbols}
+                if debug
+                else {}
+            )
 
             # Per-bar accounting buckets (for PnL decomposition).
             bar_funding_pnl = 0.0
@@ -181,6 +205,7 @@ def run_derivatives_backtest(
             if equity < total_margin_used:
                 bar_liquidated = True
                 logger.warning(f"LIQUIDATION at {ts}: Equity {equity} < Maint {total_margin_used}")
+                positions_before_liq = {sym: float(position_qty[sym]) for sym in symbols}
                 for s in symbols:
                     qty = position_qty[s]
                     if abs(qty) <= 1e-9:
@@ -228,6 +253,22 @@ def run_derivatives_backtest(
                         "liquidation": 1,
                     })
 
+                    if f_trade_debug is not None:
+                        f_trade_debug.write(
+                            json.dumps(
+                                {
+                                    "timestamp": ts.isoformat(),
+                                    "event": "liquidation",
+                                    "trade": trades_rows[-1],
+                                    "equity_before": float(equity),
+                                    "maintenance_margin_required": float(total_margin_used),
+                                    "bars": execution_bars,
+                                    "positions": positions_before_liq,
+                                }
+                            )
+                            + "\n"
+                        )
+
                     position_qty[s] = 0.0
                     entry_prices[s] = 0.0
                     holding_bars[s] = 0
@@ -236,6 +277,7 @@ def run_derivatives_backtest(
                 # Cancel any pending strategy intent after a liquidation event.
                 pending_target_exposures = None
                 pending_reason = None
+                pending_decision_context = None
 
                 # Equity after liquidation is just cash.
                 equity = cash
@@ -384,8 +426,25 @@ def run_derivatives_backtest(
                         "liquidation": 0,
                     })
 
+                    if f_trade_debug is not None:
+                        f_trade_debug.write(
+                            json.dumps(
+                                {
+                                    "timestamp": ts.isoformat(),
+                                    "trade": trades_rows[-1],
+                                    "decision": pending_decision_context,
+                                    "execution": {
+                                        "timestamp": ts.isoformat(),
+                                        "bars": execution_bars,
+                                    },
+                                }
+                            )
+                            + "\n"
+                        )
+
                 pending_target_exposures = None
                 pending_reason = None
+                pending_decision_context = None
 
             # Calculate Equity for Tracking (Mark to Market at CLOSE)
             unrealized_pnl = 0.0
@@ -517,6 +576,39 @@ def run_derivatives_backtest(
                     "reason": pending_reason,
                     "debug": decision.debug
                 }
+                if debug:
+                    decision_row["snapshot"] = {
+                        "signal_bar_end_timestamp": ts.isoformat(),
+                        "signal_bars": {
+                            s: _bar_snapshot(bars_by_symbol[s], row_i=i) for s in symbols
+                        },
+                        "state": {
+                            "cash": float(cash),
+                            "equity": float(equity),
+                            "day_start_equity": float(day_start_equity),
+                            "day_pnl": float(row["day_pnl"]),
+                            "day_return": float(row["day_return"]),
+                            "positions": {s: float(position_qty[s]) for s in symbols},
+                            "holding_bars": {s: int(holding_bars[s]) for s in symbols},
+                            "current_targets": {
+                                s: float(current_targets.get(s, 0.0)) for s in symbols
+                            },
+                            "config": {
+                                "max_position_notional_usd": float(cfg.max_position_notional_usd),
+                                "slippage_bps": float(cfg.slippage_bps),
+                                "taker_fee_bps": float(cfg.taker_fee_bps),
+                                "maintenance_margin_rate": float(cfg.maintenance_margin_rate),
+                                "liquidation_fee_rate": float(cfg.liquidation_fee_rate),
+                            },
+                        },
+                    }
+                    pending_decision_context = {
+                        "timestamp": next_ts.isoformat(),
+                        "reason": pending_reason,
+                        "targets": pending_target_exposures,
+                        "debug": decision.debug,
+                        "snapshot": decision_row["snapshot"],
+                    }
                 f_decisions.write(json.dumps(decision_row) + "\n")
 
     # Output generation

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -64,9 +65,11 @@ def run_backtest(
     run_dir: Path,
     progress: Optional[Callable[[BacktestProgress], None]] = None,
     progress_interval_s: float = 0.25,
+    debug: bool = False,
 ) -> BacktestOutputs:
     run_dir.mkdir(parents=True, exist_ok=True)
     decisions_jsonl = run_dir / "decisions.jsonl"
+    trade_debug_jsonl = run_dir / "trade_debug.jsonl"
 
     cash = float(cfg.initial_cash)
     symbols = [s.strip().upper() for s in cfg.symbols if s.strip()]
@@ -99,6 +102,7 @@ def run_backtest(
     current_targets: dict[str, float] = {s: 0.0 for s in symbols}
     pending_target_exposures: Optional[dict[str, float]] = None
     pending_reason: Optional[str] = None
+    pending_decision_context: Optional[dict[str, Any]] = None
 
     max_notional = float(cfg.max_position_notional_usd)
     slippage = float(cfg.slippage_bps) / 10_000.0
@@ -112,11 +116,33 @@ def run_backtest(
     peak_equity = float(cfg.initial_cash)
     last_progress_t = 0.0
 
-    with decisions_jsonl.open("w") as f_decisions:
+    def _bar_snapshot(symbol: str, *, row_i: int) -> dict[str, float]:
+        df = bars_by_symbol[symbol]
+        cols = ["open", "high", "low", "close", "volume", "funding_rate"]
+        out: dict[str, float] = {}
+        for col in cols:
+            if col not in df.columns:
+                continue
+            try:
+                out[col] = float(df[col].iloc[row_i])
+            except Exception:
+                continue
+        return out
+
+    with ExitStack() as stack:
+        f_decisions = stack.enter_context(decisions_jsonl.open("w"))
+        f_trade_debug = (
+            stack.enter_context(trade_debug_jsonl.open("w")) if debug else None
+        )
+
         for i in range(len(idx)):
             ts = pd.Timestamp(idx[i])
             opens = {s: float(bars_by_symbol[s]["open"].iloc[i]) for s in symbols}
             closes = {s: float(bars_by_symbol[s]["close"].iloc[i]) for s in symbols}
+
+            execution_bars = (
+                {s: _bar_snapshot(s, row_i=i) for s in symbols} if debug else {}
+            )
 
             if current_day != ts.date():
                 current_day = ts.date()
@@ -169,19 +195,34 @@ def run_backtest(
                         else 0.0
                     )
 
-                    trades_rows.append(
-                        {
-                            "timestamp": ts.isoformat(),
-                            "symbol": symbol,
-                            "side": side,
-                            "qty": float(abs(delta_qty)),
-                            "fill_price": float(fill_px),
-                            "notional": float(abs(delta_qty) * fill_px),
-                            "cash_after": float(cash),
-                            "position_qty_after": float(position_qty[symbol]),
-                            "strategy_reason": pending_reason,
-                        }
-                    )
+                    trade_row = {
+                        "timestamp": ts.isoformat(),
+                        "symbol": symbol,
+                        "side": side,
+                        "qty": float(abs(delta_qty)),
+                        "fill_price": float(fill_px),
+                        "notional": float(abs(delta_qty) * fill_px),
+                        "cash_after": float(cash),
+                        "position_qty_after": float(position_qty[symbol]),
+                        "strategy_reason": pending_reason,
+                    }
+                    trades_rows.append(trade_row)
+
+                    if f_trade_debug is not None:
+                        f_trade_debug.write(
+                            json.dumps(
+                                {
+                                    "timestamp": ts.isoformat(),
+                                    "trade": trade_row,
+                                    "decision": pending_decision_context,
+                                    "execution": {
+                                        "timestamp": ts.isoformat(),
+                                        "bars": execution_bars,
+                                    },
+                                }
+                            )
+                            + "\n"
+                        )
 
                 for s, delta, tgt in sells:
                     _exec(s, delta, tgt)
@@ -190,6 +231,7 @@ def run_backtest(
 
                 pending_target_exposures = None
                 pending_reason = None
+                pending_decision_context = None
 
             equity = cash + sum(position_qty[s] * closes[s] for s in symbols)
             day_pnl = float(equity - day_start_equity)
@@ -279,11 +321,41 @@ def run_backtest(
                 "reason": decision.reason,
                 "debug": decision.debug,
             }
+            if debug:
+                decision_row["snapshot"] = {
+                    "signal_bar_end_timestamp": ts.isoformat(),
+                    "signal_bars": {s: _bar_snapshot(s, row_i=i) for s in symbols},
+                    "state": {
+                        "cash": float(cash),
+                        "equity": float(equity),
+                        "day_start_equity": float(day_start_equity),
+                        "day_pnl": float(day_pnl),
+                        "day_return": float(day_return),
+                        "positions": {s: float(position_qty[s]) for s in symbols},
+                        "holding_bars": {s: int(holding_bars[s]) for s in symbols},
+                        "current_targets": {
+                            s: float(current_targets.get(s, 0.0)) for s in symbols
+                        },
+                        "config": {
+                            "max_position_notional_usd": float(cfg.max_position_notional_usd),
+                            "slippage_bps": float(cfg.slippage_bps),
+                            "allow_short": bool(cfg.allow_short),
+                        },
+                    },
+                }
             f_decisions.write(json.dumps(decision_row) + "\n")
 
             if any(abs(next_targets[s] - current_targets.get(s, 0.0)) > 1e-8 for s in symbols):
                 pending_target_exposures = next_targets
                 pending_reason = decision.reason
+                if debug:
+                    pending_decision_context = {
+                        "timestamp": decision_row["timestamp"],
+                        "reason": decision.reason,
+                        "targets": next_targets,
+                        "debug": decision.debug,
+                        "snapshot": decision_row.get("snapshot"),
+                    }
 
     trade_cols = [
         "timestamp",

@@ -57,6 +57,10 @@ def coerce_symbols_for_market(symbols: Iterable[str], market: Market) -> list[st
         if market == Market.CRYPTO:
             s = CRYPTO_EQUIVALENTS.get(s, s)
             s = s.replace(" ", "")
+            # Allow explicitly-specified perp/future product ids to pass through.
+            if s.endswith("-PERP") or s.endswith("-CDE"):
+                out.append(s)
+                continue
             if "/" not in s and "-" in s:
                 parts = [p for p in s.split("-") if p]
                 if len(parts) == 2:
@@ -84,6 +88,25 @@ def coerce_symbols_for_market(symbols: Iterable[str], market: Market) -> list[st
         elif market == Market.DERIVATIVES:
             s = DERIVATIVES_EQUIVALENTS.get(s, s)
             s = s.replace(" ", "")
+            if s.endswith("-CDE"):
+                out.append(s)
+                continue
+            # Allow mixing spot and perp symbols in derivatives mode (for basis hedges).
+            if "/" in s:
+                base, quote = (p.strip() for p in s.split("/", 1))
+                quote = quote or "USD"
+                out.append(f"{base}/{quote}")
+                continue
+            if "-" in s:
+                parts = [p for p in s.split("-") if p]
+                if len(parts) == 2 and parts[1] in {"USD", "USDT", "USDC"}:
+                    out.append(f"{parts[0]}/{parts[1]}")
+                    continue
+            if "_" in s:
+                parts = [p for p in s.split("_") if p]
+                if len(parts) == 2 and parts[1] in {"USD", "USDT", "USDC"}:
+                    out.append(f"{parts[0]}/{parts[1]}")
+                    continue
             # Ensure it ends with -PERP if not explicit
             if not s.endswith("-PERP") and "-PERP" not in s:
                 # Handle BTC/USD -> BTC-PERP

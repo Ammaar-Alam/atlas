@@ -147,12 +147,32 @@ def _orb_trend_space() -> list[Param]:
     ]
 
 
+def _hedge_space() -> list[Param]:
+    # Pair hedge (spot + perp). We tune the forecasting horizon, mean reversion, risk gating,
+    # and turnover controls. Fees/slippage are handled by the backtest config.
+    return [
+        FloatRange("edge_horizon_hours", 2.0, 24.0, log=True, decimals=3),
+        FloatRange("basis_halflife_hours", 6.0, 96.0, log=True, decimals=3),
+        FloatRange("theta_intercept_bps", -50.0, 50.0, decimals=3),
+        IntRange("cov_window_bars", 60, 720, log=True),
+        FloatRange("rebalance_delta_max", 0.005, 0.05, log=True, decimals=6),
+        FloatRange("rebalance_turnover_frac_per_unit_delta", 0.20, 1.00, decimals=4),
+        FloatRange("z_risk", 0.50, 2.50, decimals=4),
+        FloatRange("lambda_risk", 2.0, 40.0, log=True, decimals=6),
+        FloatRange("z_liq", 1.5, 3.5, decimals=4),
+        FloatRange("collateral_buffer_frac", 0.05, 0.30, decimals=4),
+        FloatRange("flip_hysteresis_bps", 0.0, 10.0, decimals=4),
+    ]
+
+
 def get_search_space(strategy: str) -> list[Param]:
     strategy = (strategy or "").strip().lower().replace("-", "_")
     if strategy == "perp_flare":
         return _perp_flare_space()
     if strategy == "orb_trend":
         return _orb_trend_space()
+    if strategy == "hedge":
+        return _hedge_space()
     raise ValueError(f"no tuning space defined for strategy: {strategy}")
 
 
@@ -202,12 +222,49 @@ def _validate_orb_trend_params(params: dict[str, Any]) -> bool:
         return False
 
 
+def _validate_hedge_params(params: dict[str, Any]) -> bool:
+    try:
+        if float(params.get("edge_horizon_hours", 0.0)) <= 0:
+            return False
+        if float(params.get("basis_halflife_hours", 0.0)) <= 0:
+            return False
+        if int(params.get("cov_window_bars", 0)) < 20:
+            return False
+        if float(params.get("rebalance_delta_max", 0.0)) <= 0:
+            return False
+        if float(params.get("rebalance_turnover_frac_per_unit_delta", 0.0)) <= 0:
+            return False
+        if float(params.get("z_risk", 0.0)) <= 0:
+            return False
+        if float(params.get("lambda_risk", 0.0)) <= 0:
+            return False
+        if float(params.get("z_liq", 0.0)) <= 0:
+            return False
+        if not (0.0 <= float(params.get("collateral_buffer_frac", 0.0)) < 1.0):
+            return False
+        # Some hedge params may be fixed externally (not part of the search space). If present,
+        # validate them; otherwise allow them to be set via defaults/base params.
+        max_leverage = params.get("max_leverage")
+        if max_leverage is not None and float(max_leverage) <= 0:
+            return False
+        max_margin_util = params.get("max_margin_utilization")
+        if max_margin_util is not None and not (0.0 < float(max_margin_util) <= 1.0):
+            return False
+        if float(params.get("flip_hysteresis_bps", 0.0)) < 0:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def validate_params(strategy: str, params: dict[str, Any]) -> bool:
     strategy = (strategy or "").strip().lower().replace("-", "_")
     if strategy == "perp_flare":
         return _validate_perp_flare_params(params)
     if strategy == "orb_trend":
         return _validate_orb_trend_params(params)
+    if strategy == "hedge":
+        return _validate_hedge_params(params)
     return True
 
 

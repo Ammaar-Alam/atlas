@@ -176,6 +176,9 @@ def load_universe_bars(
             granularity = "FIVE_MINUTE"
         elif timeframe.minutes == 15:
             granularity = "FIFTEEN_MINUTE"
+        elif timeframe.minutes == 30:
+            # Coinbase does not support native 30-minute candles; fetch 15-minute and resample downstream.
+            granularity = "FIFTEEN_MINUTE"
         elif timeframe.minutes == 60:
             granularity = "ONE_HOUR"
         elif timeframe.minutes == 360:

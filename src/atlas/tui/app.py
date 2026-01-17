@@ -64,6 +64,7 @@ class TuiState:
     max_position_notional_usd: float = 10_000.0
     slippage_bps: float = 0.0
     allow_short: bool = False
+    debug: bool = False
     paper_lookback_bars: int = 200
     paper_poll_seconds: int = 60
     paper_max_position_notional_usd: float = 1_000.0
@@ -196,6 +197,88 @@ STRATEGY_PARAM_SPECS: dict[str, dict[str, type]] = {
         "flip_confirm_bars": int,
         "cooldown_bars": int,
     },
+    "perp_scalp": {
+        "atr_window": int,
+        "ema_fast": int,
+        "ema_slow": int,
+        "er_window": int,
+        "breakout_window": int,
+        "breakout_buffer_bps": float,
+        "er_min": float,
+        "trend_z_min": float,
+        "min_atr_bps": float,
+        "edge_floor_bps": float,
+        "k_cost": float,
+        "taker_fee_bps": float,
+        "slippage_bps": float,
+        "funding_entry_bps_per_day": float,
+        "funding_exit_bps_per_day": float,
+        "risk_per_trade": float,
+        "stop_atr_mult": float,
+        "trail_atr_mult": float,
+        "take_profit_atr_mult": float,
+        "max_hold_bars": int,
+        "min_hold_bars": int,
+        "flip_confirm_bars": int,
+        "cooldown_bars": int,
+        "sizing_mode": str,
+        "target_leverage": float,
+        "max_leverage": float,
+        "max_margin_utilization": float,
+        "maintenance_margin_rate": float,
+        "min_liq_buffer_atr": float,
+        "daily_loss_limit": float,
+        "kill_switch": float,
+    },
+    "basis_carry": {
+        "funding_ema_alpha": float,
+        "funding_entry_bps_per_day": float,
+        "funding_exit_bps_per_day": float,
+        "edge_horizon_hours": float,
+        "min_basis_bps": float,
+        "min_basis_exit_bps": float,
+        "basis_mean_bps": float,
+        "basis_halflife_hours": float,
+        "basis_momentum_window_bars": int,
+        "max_basis_widening_bps_per_hour": float,
+        "basis_vol_window_bars": int,
+        "lambda_basis_vol": float,
+        "edge_saturation_bps": float,
+        "collateral_buffer_frac": float,
+        "z_sigma_daily": float,
+        "spot_vol_window_bars": int,
+        "max_leverage": float,
+        "max_margin_utilization": float,
+        "maintenance_margin_rate": float,
+        "rebalance_drift_frac": float,
+        "rebalance_min_notional_usd": float,
+        "min_trade_notional_usd": float,
+        "allow_reverse": bool,
+        "require_funding_rate": bool,
+    },
+    "hedge": {
+        "edge_horizon_hours": float,
+        "funding_ema_alpha": float,
+        "basis_halflife_hours": float,
+        "theta_intercept_bps": float,
+        "theta_funding_beta": float,
+        "include_expected_rebalance_costs": bool,
+        "cov_window_bars": int,
+        "rebalance_delta_max": float,
+        "rebalance_turnover_frac_per_unit_delta": float,
+        "spot_financing_rate_per_hour": float,
+        "z_risk": float,
+        "lambda_risk": float,
+        "z_liq": float,
+        "collateral_buffer_frac": float,
+        "max_leverage": float,
+        "max_margin_utilization": float,
+        "maintenance_margin_rate": float,
+        "min_trade_notional_usd": float,
+        "rebalance_min_notional_usd": float,
+        "flip_hysteresis_bps": float,
+        "require_funding_rate": bool,
+    },
 }
 
 STRATEGY_DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
@@ -300,6 +383,88 @@ STRATEGY_DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
         "min_hold_bars": 3,
         "flip_confirm_bars": 3,
         "cooldown_bars": 5,
+    },
+    "perp_scalp": {
+        "atr_window": 14,
+        "ema_fast": 8,
+        "ema_slow": 21,
+        "er_window": 10,
+        "breakout_window": 8,
+        "breakout_buffer_bps": 1.0,
+        "er_min": 0.25,
+        "trend_z_min": 0.15,
+        "min_atr_bps": 8.0,
+        "edge_floor_bps": 3.0,
+        "k_cost": 1.5,
+        "taker_fee_bps": 3.0,
+        "slippage_bps": 1.5,
+        "funding_entry_bps_per_day": 40.0,
+        "funding_exit_bps_per_day": 80.0,
+        "risk_per_trade": 0.005,
+        "stop_atr_mult": 1.2,
+        "trail_atr_mult": 1.8,
+        "take_profit_atr_mult": 1.5,
+        "max_hold_bars": 12,
+        "min_hold_bars": 2,
+        "flip_confirm_bars": 2,
+        "cooldown_bars": 4,
+        "sizing_mode": "risk",
+        "target_leverage": None,
+        "max_leverage": 5.0,
+        "max_margin_utilization": 0.40,
+        "maintenance_margin_rate": 0.05,
+        "min_liq_buffer_atr": 2.5,
+        "daily_loss_limit": 0.02,
+        "kill_switch": 0.10,
+    },
+    "basis_carry": {
+        "funding_ema_alpha": 0.20,
+        "funding_entry_bps_per_day": 10.0,
+        "funding_exit_bps_per_day": 0.0,
+        "edge_horizon_hours": 8.0,
+        "min_basis_bps": 5.0,
+        "min_basis_exit_bps": 0.0,
+        "basis_mean_bps": 0.0,
+        "basis_halflife_hours": 24.0,
+        "basis_momentum_window_bars": 30,
+        "max_basis_widening_bps_per_hour": 10.0,
+        "basis_vol_window_bars": 120,
+        "lambda_basis_vol": 1.0,
+        "edge_saturation_bps": 50.0,
+        "collateral_buffer_frac": 0.10,
+        "z_sigma_daily": 3.0,
+        "spot_vol_window_bars": 120,
+        "max_leverage": 3.0,
+        "max_margin_utilization": 0.50,
+        "maintenance_margin_rate": 0.05,
+        "rebalance_drift_frac": 0.02,
+        "rebalance_min_notional_usd": 100.0,
+        "min_trade_notional_usd": 200.0,
+        "allow_reverse": False,
+        "require_funding_rate": False,
+    },
+    "hedge": {
+        "edge_horizon_hours": 8.0,
+        "funding_ema_alpha": 0.20,
+        "basis_halflife_hours": 24.0,
+        "theta_intercept_bps": 0.0,
+        "theta_funding_beta": 0.25,
+        "include_expected_rebalance_costs": True,
+        "cov_window_bars": 240,
+        "rebalance_delta_max": 0.02,
+        "rebalance_turnover_frac_per_unit_delta": 0.50,
+        "spot_financing_rate_per_hour": 0.0,
+        "z_risk": 1.0,
+        "lambda_risk": 8.0,
+        "z_liq": 2.33,
+        "collateral_buffer_frac": 0.10,
+        "max_leverage": 3.0,
+        "max_margin_utilization": 0.50,
+        "maintenance_margin_rate": 0.05,
+        "min_trade_notional_usd": 200.0,
+        "rebalance_min_notional_usd": 100.0,
+        "flip_hysteresis_bps": 2.0,
+        "require_funding_rate": False,
     },
 }
 
@@ -421,6 +586,7 @@ class AtlasTui(App):
         "/maxnotional",
         "/slippage",
         "/short",
+        "/debug",
         "/data",
         "/feed",
         "/paperfeed",
@@ -543,6 +709,13 @@ class AtlasTui(App):
             "no-trade": "no_trade",
             "perp-flare": "perp_flare",
             "perp-hawk": "perp_hawk",
+            "perp-scalp": "perp_scalp",
+            "basis-carry": "basis_carry",
+            "cash-and-carry": "basis_carry",
+            "hedge": "hedge",
+            "hedge-implementation": "hedge",
+            "hedge-impl": "hedge",
+            "hedge_impl": "hedge",
         }
         if name in alias_map:
             return alias_map[name]
@@ -562,6 +735,9 @@ class AtlasTui(App):
             "no_trade": "no-trade",
             "perp_flare": "perp-flare",
             "perp_hawk": "perp-hawk",
+            "perp_scalp": "perp-scalp",
+            "basis_carry": "basis-carry",
+            "hedge": "hedge-implementation",
         }
         alias = alias_map.get(strategy)
         if alias and alias in self.state.strategy_params and strategy not in self.state.strategy_params:
@@ -673,8 +849,11 @@ class AtlasTui(App):
             s.strip() for s in str(self.state.symbols or "").split(",") if s.strip()
         ]
         if not current_symbols:
-            default_count = 2 if strategy in {"nec_x", "nec_pdt"} else 1
-            current_symbols = default_symbols(mkt, count=default_count)
+            if strategy in {"basis_carry", "hedge"} and mkt in {Market.CRYPTO, Market.DERIVATIVES}:
+                current_symbols = ["BTC/USD", "BTC-PERP"]
+            else:
+                default_count = 2 if strategy in {"nec_x", "nec_pdt", "basis_carry", "hedge"} else 1
+                current_symbols = default_symbols(mkt, count=default_count)
         else:
             if mkt == Market.EQUITY and any("/" in s for s in current_symbols):
                 default_count = 2 if strategy in {"nec_x", "nec_pdt"} else 1
@@ -682,9 +861,12 @@ class AtlasTui(App):
             else:
                 current_symbols = coerce_symbols_for_market(current_symbols, mkt)
 
-        if strategy in {"nec_x", "nec_pdt"}:
+        if strategy in {"nec_x", "nec_pdt", "basis_carry", "hedge"}:
             if len(current_symbols) < 2:
-                current_symbols = default_symbols(mkt, count=2)
+                if strategy in {"basis_carry", "hedge"} and mkt in {Market.CRYPTO, Market.DERIVATIVES}:
+                    current_symbols = ["BTC/USD", "BTC-PERP"]
+                else:
+                    current_symbols = default_symbols(mkt, count=2)
             elif len(current_symbols) > 2:
                 current_symbols = current_symbols[:2]
 
@@ -707,6 +889,8 @@ class AtlasTui(App):
             return ["0", "0.5", "1.25", "2.0", "5.0"]
         if cmd == "/short":
             return ["true", "false"]
+        if cmd == "/debug":
+            return ["on", "off"]
         if cmd == "/data":
             return ["sample", "csv", "alpaca", "coinbase"]
         if cmd in {"/feed", "/paperfeed"}:
@@ -942,7 +1126,7 @@ class AtlasTui(App):
                 "/bar <1Min|5Min|30Min|60Min|4H>, /algorithm <name>, /data <sample|csv|alpaca|coinbase>, "
                 "/tune start|stop|apply|trials|seed|train|validate|test|step|drift|margin, "
                 "/param <key> <value>, /params, "
-                "/fast <int>, /slow <int>, /cash <usd> (/initialcash <usd>), /maxnotional <usd>, /slippage <bps>, /short <true|false>, "
+                "/fast <int>, /slow <int>, /cash <usd> (/initialcash <usd>), /maxnotional <usd>, /slippage <bps>, /short <true|false>, /debug <true|false>, "
                 "/feed <iex|delayed_sip|sip>, /paperfeed <iex|delayed_sip|sip>, /csv <path>, "
                 "/paperlookback <bars>, /paperpoll <seconds>, /papermaxnotional <usd>, "
                 "/paperclosed <true|false>, /paperrth <true|false>, /paperlimitbps <float>, /paperdry <true|false>, "
@@ -1128,6 +1312,19 @@ class AtlasTui(App):
             self._render_settings()
             return
 
+        if cmd == "/debug":
+            if not args:
+                self._write_log(f"debug is {'on' if self.state.debug else 'off'}")
+                return
+            value = _parse_bool_arg(args[0])
+            if value is None:
+                self._write_log("debug must be true|false (or on|off)")
+                return
+            self.state.debug = bool(value)
+            self._render_settings()
+            self._write_log(f"debug set to {'on' if self.state.debug else 'off'}")
+            return
+
         if cmd == "/paperclosed" and args:
             value = _parse_bool_arg(args[0])
             if value is None:
@@ -1252,6 +1449,24 @@ class AtlasTui(App):
             self.state.strategy = strategy
             self._ensure_strategy_params(strategy)
             mkt = parse_market(self.state.market)
+            if strategy in {"basis_carry", "hedge"}:
+                current_symbols = [
+                    s.strip().upper() for s in self.state.symbols.split(",") if s.strip()
+                ]
+                if len(current_symbols) < 2:
+                    if mkt in {Market.CRYPTO, Market.DERIVATIVES}:
+                        self.state.symbols = "BTC/USD,BTC-PERP"
+                    else:
+                        self.state.symbols = ",".join(default_symbols(mkt, count=2))
+                    self._write_log(
+                        f"{strategy} is pair-based (spot + perp). "
+                        f"Defaulting to {self.state.symbols}. Set via /symbols BASE/USD,BASE-PERP"
+                    )
+                elif len(current_symbols) > 2:
+                    self.state.symbols = ",".join(current_symbols[:2])
+                    self._write_log(
+                        f"{strategy} is pair-based (2 symbols). Using first two: {self.state.symbols}"
+                    )
             if strategy in {"nec_x", "nec_pdt", "orb_trend"}:
                 current_symbols = [
                     s.strip().upper() for s in self.state.symbols.split(",") if s.strip()
@@ -1511,6 +1726,12 @@ class AtlasTui(App):
         _section("Sizing")
         table.add_row("initial_cash", f"{self.state.initial_cash:.2f}")
         table.add_row("max_notional", f"{self.state.max_position_notional_usd:.2f}")
+
+        _section("Debug")
+        table.add_row(
+            "debug",
+            Text("true", style="green") if self.state.debug else Text("false", style="red"),
+        )
 
         _section("Paper")
         table.add_row(
@@ -2882,6 +3103,7 @@ class AtlasTui(App):
                         run_dir=run_dir,
                         progress=_progress,
                         progress_interval_s=0.25,
+                        debug=bool(snapshot.get("debug", False)),
                     )
                 else:
                     run_backtest(
@@ -2891,6 +3113,7 @@ class AtlasTui(App):
                         run_dir=run_dir,
                         progress=_progress,
                         progress_interval_s=0.25,
+                        debug=bool(snapshot.get("debug", False)),
                     )
 
                 self._backtest_events.put(("status", "finalizing…"))
@@ -2909,6 +3132,9 @@ class AtlasTui(App):
                 summary.add_column("k", style="bold")
                 summary.add_column("v")
                 summary.add_row("run_dir", str(run_dir))
+                if bool(snapshot.get("debug", False)):
+                    summary.add_row("debug", "enabled")
+                    summary.add_row("trade_debug", str(run_dir / "trade_debug.jsonl"))
                 summary.add_row("symbols", ",".join(symbols))
                 summary.add_row("data", f"{data_source} ({data_hint})")
                 summary.add_row(
@@ -3056,9 +3282,16 @@ class AtlasTui(App):
                 strategy=strat,
                 cfg=cfg,
                 run_dir=run_dir,
+                debug=bool(self.state.debug),
             )
         else:
-            run_backtest(bars_by_symbol=bars_by_symbol, strategy=strat, cfg=cfg, run_dir=run_dir)
+            run_backtest(
+                bars_by_symbol=bars_by_symbol,
+                strategy=strat,
+                cfg=cfg,
+                run_dir=run_dir,
+                debug=bool(self.state.debug),
+            )
 
         metrics = json.loads((run_dir / "metrics.json").read_text())
         equity_curve = pd.read_csv(
@@ -3075,6 +3308,9 @@ class AtlasTui(App):
         summary.add_column("k", style="bold")
         summary.add_column("v")
         summary.add_row("run_dir", str(run_dir))
+        if bool(self.state.debug):
+            summary.add_row("debug", "enabled")
+            summary.add_row("trade_debug", str(run_dir / "trade_debug.jsonl"))
         summary.add_row("symbols", ",".join(symbols))
         summary.add_row("data", f"{self.state.data_source} ({data_hint})")
         summary.add_row(
