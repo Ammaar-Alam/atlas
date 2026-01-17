@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
+import logging
 import math
+import os
 import random
 import shutil
 import statistics
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
@@ -20,6 +24,8 @@ from atlas.backtest.metrics import compute_metrics
 from atlas.market import Market, parse_market
 from atlas.strategies.base import Strategy
 from atlas.strategies.registry import build_strategy
+
+logger = logging.getLogger(__name__)
 
 
 def parse_duration_spec(spec: str) -> timedelta:
@@ -361,12 +367,137 @@ class WalkForwardConfig:
 @dataclass(frozen=True)
 class TuneConfig:
     trials_per_segment: int = 60
+    jobs: int = 1
     seed: int = 7
     drift_frac: Optional[float] = 0.50
     improvement_margin: float = 0.0
     objective: ObjectiveConfig = field(default_factory=ObjectiveConfig)
     walk_forward: WalkForwardConfig = field(default_factory=WalkForwardConfig)
     keep_best_test_runs: bool = True
+
+
+_TUNE_WORKER_BARS_BY_SYMBOL: Optional[dict[str, pd.DataFrame]] = None
+_TUNE_WORKER_COMMON_INDEX: Optional[pd.DatetimeIndex] = None
+
+
+def _init_tune_worker(
+    bars_by_symbol: dict[str, pd.DataFrame], common_index: pd.DatetimeIndex
+) -> None:
+    global _TUNE_WORKER_BARS_BY_SYMBOL, _TUNE_WORKER_COMMON_INDEX
+    _TUNE_WORKER_BARS_BY_SYMBOL = bars_by_symbol
+    _TUNE_WORKER_COMMON_INDEX = common_index
+
+
+def _evaluate_train_validate_trial(
+    *,
+    market: str,
+    symbols: list[str],
+    strategy: str,
+    backtest_cfg: BacktestConfig,
+    objective: ObjectiveConfig,
+    segment: int,
+    trial: int,
+    params: dict[str, Any],
+    train_start: datetime,
+    train_end: datetime,
+    validate_start: datetime,
+    validate_end: datetime,
+) -> dict[str, Any]:
+    bars_by_symbol = _TUNE_WORKER_BARS_BY_SYMBOL
+    common_index = _TUNE_WORKER_COMMON_INDEX
+    if bars_by_symbol is None or common_index is None:
+        raise RuntimeError("tune worker not initialized")
+
+    market_enum = parse_market(market)
+
+    with tempfile.TemporaryDirectory(prefix="atlas_tune_") as tmp:
+        root = Path(tmp)
+        train_dir = root / "train"
+        validate_dir = root / "validate"
+        train_dir.mkdir(parents=True, exist_ok=True)
+        validate_dir.mkdir(parents=True, exist_ok=True)
+
+        strategy_train = _build_strategy_instance(
+            strategy_name=strategy,
+            symbols=symbols,
+            params=params,
+        )
+        warmup = strategy_train.warmup_bars()
+
+        train_bars = _slice_bars_with_warmup(
+            bars_by_symbol,
+            common_index,
+            score_start=train_start,
+            score_end=train_end,
+            warmup_bars=warmup,
+        )
+        _run_backtest_for_market(
+            market=market_enum,
+            bars_by_symbol=train_bars,
+            strategy=strategy_train,
+            cfg=backtest_cfg,
+            run_dir=train_dir,
+            output_mode="minimal",
+        )
+        train_score = score_run(
+            train_dir,
+            objective=objective,
+            score_start=train_start,
+            score_end=train_end,
+        )
+
+        validate_bars = _slice_bars_with_warmup(
+            bars_by_symbol,
+            common_index,
+            score_start=validate_start,
+            score_end=validate_end,
+            warmup_bars=warmup,
+        )
+        _run_backtest_for_market(
+            market=market_enum,
+            bars_by_symbol=validate_bars,
+            strategy=_build_strategy_instance(
+                strategy_name=strategy,
+                symbols=symbols,
+                params=params,
+            ),
+            cfg=backtest_cfg,
+            run_dir=validate_dir,
+            output_mode="minimal",
+        )
+        validate_score = score_run(
+            validate_dir,
+            objective=objective,
+            score_start=validate_start,
+            score_end=validate_end,
+        )
+
+    selection_score = 0.25 * float(train_score.score) + 0.75 * float(validate_score.score)
+    rejected = bool(train_score.rejected or validate_score.rejected)
+    reject_reason = str(train_score.reason or validate_score.reason or "")
+
+    return {
+        "segment": int(segment),
+        "trial": int(trial),
+        "params": dict(params),
+        "selection_score": float(selection_score),
+        "rejected": bool(rejected),
+        "reject_reason": reject_reason,
+        "train": {
+            "score": float(train_score.score),
+            "rejected": bool(train_score.rejected),
+            "reject_reason": str(train_score.reason or ""),
+            "stats": asdict(train_score.stats),
+            "breakdown": dict(train_score.breakdown),
+        },
+        "validate": {
+            "score": float(validate_score.score),
+            "rejected": bool(validate_score.rejected),
+            "reject_reason": str(validate_score.reason or ""),
+            "stats": asdict(validate_score.stats),
+            "breakdown": dict(validate_score.breakdown),
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -882,324 +1013,469 @@ def tune_walk_forward(
     fixed_params = dict(base_params or {})
     incumbent = dict(base_params or {})
 
+    jobs = int(tune_cfg.jobs)
+    if jobs <= 0:
+        jobs = int(os.cpu_count() or 1)
+    jobs = max(1, jobs)
+
+    executor: Optional[concurrent.futures.Executor] = None
+    if jobs > 1:
+        try:
+            executor = concurrent.futures.ProcessPoolExecutor(
+                max_workers=int(jobs),
+                initializer=_init_tune_worker,
+                initargs=(bars_by_symbol, common_index),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Parallel tuning: ProcessPoolExecutor unavailable (%s). Falling back to threads.",
+                exc,
+            )
+            _init_tune_worker(bars_by_symbol, common_index)
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=int(jobs))
+
     t0 = time.perf_counter()
-    with trials_path.open("w") as f_trials:
-        for seg_i, seg in enumerate(segments):
-            if stop_event is not None and stop_event.is_set():
-                break
-
-            best_params: Optional[dict[str, Any]] = None
-            best_selection_score = float("-inf")
-            best_train: dict[str, Any] = {}
-            best_val: dict[str, Any] = {}
-
-            seg_tmp_dir = run_dir / "tmp" / f"seg{seg_i:03d}"
-            train_tmp = seg_tmp_dir / "train"
-            val_tmp = seg_tmp_dir / "val"
-            train_tmp.mkdir(parents=True, exist_ok=True)
-            val_tmp.mkdir(parents=True, exist_ok=True)
-
-            # Always evaluate incumbent as a candidate if provided.
-            incumbent_selection_score = float("-inf")
-            if incumbent:
-                incumbent_params = dict(fixed_params)
-                incumbent_params.update(incumbent)
-                warmup = _build_strategy_instance(
-                    strategy_name=strategy,
-                    symbols=symbols,
-                    params=incumbent_params,
-                ).warmup_bars()
-
-                train_bars = _slice_bars_with_warmup(
-                    bars_by_symbol,
-                    common_index,
-                    score_start=seg.train.start,
-                    score_end=seg.train.end,
-                    warmup_bars=warmup,
-                )
-                _run_backtest_for_market(
-                    market=market_enum,
-                    bars_by_symbol=train_bars,
-                    strategy=_build_strategy_instance(
-                        strategy_name=strategy,
-                        symbols=symbols,
-                        params=incumbent_params,
-                    ),
-                    cfg=backtest_cfg,
-                    run_dir=train_tmp,
-                    output_mode="minimal",
-                )
-                train_scored = score_run(
-                    train_tmp,
-                    objective=tune_cfg.objective,
-                    score_start=seg.train.start,
-                    score_end=seg.train.end,
-                )
-
-                val_bars = _slice_bars_with_warmup(
-                    bars_by_symbol,
-                    common_index,
-                    score_start=seg.validate.start,
-                    score_end=seg.validate.end,
-                    warmup_bars=warmup,
-                )
-                _run_backtest_for_market(
-                    market=market_enum,
-                    bars_by_symbol=val_bars,
-                    strategy=_build_strategy_instance(
-                        strategy_name=strategy,
-                        symbols=symbols,
-                        params=incumbent_params,
-                    ),
-                    cfg=backtest_cfg,
-                    run_dir=val_tmp,
-                    output_mode="minimal",
-                )
-                val_scored = score_run(
-                    val_tmp,
-                    objective=tune_cfg.objective,
-                    score_start=seg.validate.start,
-                    score_end=seg.validate.end,
-                )
-
-                incumbent_selection_score = 0.25 * float(
-                    train_scored.score
-                ) + 0.75 * float(val_scored.score)
-
-            for trial_i in range(int(tune_cfg.trials_per_segment)):
+    try:
+        with trials_path.open("w") as f_trials:
+            for seg_i, seg in enumerate(segments):
                 if stop_event is not None and stop_event.is_set():
                     break
 
-                params = sample_params(
-                    strategy=strategy,
-                    rng=rng,
-                    space=space,
-                    incumbent=incumbent if incumbent else None,
-                    drift_frac=tune_cfg.drift_frac,
-                )
-                full_params = dict(fixed_params)
-                full_params.update(params)
+                best_params: Optional[dict[str, Any]] = None
+                best_selection_score = float("-inf")
+                best_train: dict[str, Any] = {}
+                best_val: dict[str, Any] = {}
+
+                seg_tmp_dir = run_dir / "tmp" / f"seg{seg_i:03d}"
+                train_tmp = seg_tmp_dir / "train"
+                val_tmp = seg_tmp_dir / "val"
+                train_tmp.mkdir(parents=True, exist_ok=True)
+                val_tmp.mkdir(parents=True, exist_ok=True)
+
+                # Always evaluate incumbent as a candidate if provided.
+                incumbent_selection_score = float("-inf")
+                if incumbent:
+                    incumbent_params = dict(fixed_params)
+                    incumbent_params.update(incumbent)
+                    warmup = _build_strategy_instance(
+                        strategy_name=strategy,
+                        symbols=symbols,
+                        params=incumbent_params,
+                    ).warmup_bars()
+
+                    train_bars = _slice_bars_with_warmup(
+                        bars_by_symbol,
+                        common_index,
+                        score_start=seg.train.start,
+                        score_end=seg.train.end,
+                        warmup_bars=warmup,
+                    )
+                    _run_backtest_for_market(
+                        market=market_enum,
+                        bars_by_symbol=train_bars,
+                        strategy=_build_strategy_instance(
+                            strategy_name=strategy,
+                            symbols=symbols,
+                            params=incumbent_params,
+                        ),
+                        cfg=backtest_cfg,
+                        run_dir=train_tmp,
+                        output_mode="minimal",
+                    )
+                    train_scored = score_run(
+                        train_tmp,
+                        objective=tune_cfg.objective,
+                        score_start=seg.train.start,
+                        score_end=seg.train.end,
+                    )
+
+                    val_bars = _slice_bars_with_warmup(
+                        bars_by_symbol,
+                        common_index,
+                        score_start=seg.validate.start,
+                        score_end=seg.validate.end,
+                        warmup_bars=warmup,
+                    )
+                    _run_backtest_for_market(
+                        market=market_enum,
+                        bars_by_symbol=val_bars,
+                        strategy=_build_strategy_instance(
+                            strategy_name=strategy,
+                            symbols=symbols,
+                            params=incumbent_params,
+                        ),
+                        cfg=backtest_cfg,
+                        run_dir=val_tmp,
+                        output_mode="minimal",
+                    )
+                    val_scored = score_run(
+                        val_tmp,
+                        objective=tune_cfg.objective,
+                        score_start=seg.validate.start,
+                        score_end=seg.validate.end,
+                    )
+
+                    incumbent_selection_score = 0.25 * float(
+                        train_scored.score
+                    ) + 0.75 * float(val_scored.score)
+
+                if executor is None:
+                    for trial_i in range(int(tune_cfg.trials_per_segment)):
+                        if stop_event is not None and stop_event.is_set():
+                            break
+
+                        params = sample_params(
+                            strategy=strategy,
+                            rng=rng,
+                            space=space,
+                            incumbent=incumbent if incumbent else None,
+                            drift_frac=tune_cfg.drift_frac,
+                        )
+                        full_params = dict(fixed_params)
+                        full_params.update(params)
+                        warmup = _build_strategy_instance(
+                            strategy_name=strategy,
+                            symbols=symbols,
+                            params=full_params,
+                        ).warmup_bars()
+                        train_bars = _slice_bars_with_warmup(
+                            bars_by_symbol,
+                            common_index,
+                            score_start=seg.train.start,
+                            score_end=seg.train.end,
+                            warmup_bars=warmup,
+                        )
+                        _run_backtest_for_market(
+                            market=market_enum,
+                            bars_by_symbol=train_bars,
+                            strategy=_build_strategy_instance(
+                                strategy_name=strategy,
+                                symbols=symbols,
+                                params=full_params,
+                            ),
+                            cfg=backtest_cfg,
+                            run_dir=train_tmp,
+                            output_mode="minimal",
+                        )
+                        train_score = score_run(
+                            train_tmp,
+                            objective=tune_cfg.objective,
+                            score_start=seg.train.start,
+                            score_end=seg.train.end,
+                        )
+
+                        val_bars = _slice_bars_with_warmup(
+                            bars_by_symbol,
+                            common_index,
+                            score_start=seg.validate.start,
+                            score_end=seg.validate.end,
+                            warmup_bars=warmup,
+                        )
+                        _run_backtest_for_market(
+                            market=market_enum,
+                            bars_by_symbol=val_bars,
+                            strategy=_build_strategy_instance(
+                                strategy_name=strategy,
+                                symbols=symbols,
+                                params=full_params,
+                            ),
+                            cfg=backtest_cfg,
+                            run_dir=val_tmp,
+                            output_mode="minimal",
+                        )
+                        val_score = score_run(
+                            val_tmp,
+                            objective=tune_cfg.objective,
+                            score_start=seg.validate.start,
+                            score_end=seg.validate.end,
+                        )
+
+                        # Selection score: favor validation, but require it isn't a train-only mirage.
+                        selection_score = 0.25 * float(train_score.score) + 0.75 * float(
+                            val_score.score
+                        )
+
+                        record = TrialRecord(
+                            segment=int(seg_i),
+                            trial=int(trial_i),
+                            phase="train",
+                            params=dict(full_params),
+                            score=float(train_score.score),
+                            rejected=bool(train_score.rejected),
+                            reject_reason=str(train_score.reason or ""),
+                            stats=asdict(train_score.stats),
+                            breakdown=dict(train_score.breakdown),
+                        )
+                        f_trials.write(json.dumps(asdict(record)) + "\n")
+                        record = TrialRecord(
+                            segment=int(seg_i),
+                            trial=int(trial_i),
+                            phase="validate",
+                            params=dict(full_params),
+                            score=float(val_score.score),
+                            rejected=bool(val_score.rejected),
+                            reject_reason=str(val_score.reason or ""),
+                            stats=asdict(val_score.stats),
+                            breakdown=dict(val_score.breakdown),
+                        )
+                        f_trials.write(json.dumps(asdict(record)) + "\n")
+
+                        # Prefer candidates that pass both windows.
+                        rejected = bool(train_score.rejected or val_score.rejected)
+                        if not rejected and float(selection_score) > float(
+                            best_selection_score
+                        ):
+                            best_selection_score = float(selection_score)
+                            best_params = dict(full_params)
+                            best_train = {
+                                "score": float(train_score.score),
+                                "stats": asdict(train_score.stats),
+                                "breakdown": dict(train_score.breakdown),
+                            }
+                            best_val = {
+                                "score": float(val_score.score),
+                                "stats": asdict(val_score.stats),
+                                "breakdown": dict(val_score.breakdown),
+                            }
+
+                        if on_progress is not None:
+                            on_progress(
+                                TuneProgress(
+                                    segment=int(seg_i),
+                                    n_segments=int(len(segments)),
+                                    trial=int(trial_i + 1),
+                                    trials_per_segment=int(tune_cfg.trials_per_segment),
+                                    phase="search",
+                                    best_selection_score=float(best_selection_score),
+                                    best_params=dict(best_params or {}),
+                                    last_score=float(selection_score),
+                                    last_rejected=bool(rejected),
+                                    last_reject_reason=str(
+                                        train_score.reason or val_score.reason or ""
+                                    ),
+                                )
+                            )
+                else:
+                    params_by_trial: list[dict[str, Any]] = []
+                    for trial_i in range(int(tune_cfg.trials_per_segment)):
+                        if stop_event is not None and stop_event.is_set():
+                            break
+                        params = sample_params(
+                            strategy=strategy,
+                            rng=rng,
+                            space=space,
+                            incumbent=incumbent if incumbent else None,
+                            drift_frac=tune_cfg.drift_frac,
+                        )
+                        full_params = dict(fixed_params)
+                        full_params.update(params)
+                        params_by_trial.append(full_params)
+
+                    futures: dict[int, concurrent.futures.Future] = {}
+                    for trial_i, full_params in enumerate(params_by_trial):
+                        futures[trial_i] = executor.submit(
+                            _evaluate_train_validate_trial,
+                            market=market_enum.value,
+                            symbols=symbols,
+                            strategy=strategy,
+                            backtest_cfg=backtest_cfg,
+                            objective=tune_cfg.objective,
+                            segment=int(seg_i),
+                            trial=int(trial_i),
+                            params=dict(full_params),
+                            train_start=seg.train.start,
+                            train_end=seg.train.end,
+                            validate_start=seg.validate.start,
+                            validate_end=seg.validate.end,
+                        )
+
+                    results_by_trial: dict[int, dict[str, Any]] = {}
+                    completed = 0
+                    for fut in concurrent.futures.as_completed(futures.values()):
+                        res = fut.result()
+                        results_by_trial[int(res["trial"])] = dict(res)
+                        completed += 1
+
+                        if on_progress is not None:
+                            best_so_far_score = float("-inf")
+                            best_so_far_params: dict[str, Any] = {}
+                            for trial_j in sorted(results_by_trial.keys()):
+                                r = results_by_trial[trial_j]
+                                if bool(r.get("rejected", False)):
+                                    continue
+                                score = float(r.get("selection_score", float("-inf")))
+                                if score > best_so_far_score:
+                                    best_so_far_score = float(score)
+                                    best_so_far_params = dict(r.get("params") or {})
+                            on_progress(
+                                TuneProgress(
+                                    segment=int(seg_i),
+                                    n_segments=int(len(segments)),
+                                    trial=int(completed),
+                                    trials_per_segment=int(tune_cfg.trials_per_segment),
+                                    phase="search",
+                                    best_selection_score=float(best_so_far_score),
+                                    best_params=dict(best_so_far_params),
+                                    last_score=float(res.get("selection_score", float("-inf"))),
+                                    last_rejected=bool(res.get("rejected", False)),
+                                    last_reject_reason=str(res.get("reject_reason", "")),
+                                )
+                            )
+
+                    for trial_i in range(len(params_by_trial)):
+                        res = results_by_trial.get(trial_i)
+                        if res is None:
+                            continue
+
+                        train = dict(res.get("train") or {})
+                        validate = dict(res.get("validate") or {})
+                        selection_score = float(res.get("selection_score", float("-inf")))
+
+                        record = TrialRecord(
+                            segment=int(seg_i),
+                            trial=int(trial_i),
+                            phase="train",
+                            params=dict(res.get("params") or {}),
+                            score=float(train.get("score", float("-inf"))),
+                            rejected=bool(train.get("rejected", False)),
+                            reject_reason=str(train.get("reject_reason", "")),
+                            stats=dict(train.get("stats") or {}),
+                            breakdown=dict(train.get("breakdown") or {}),
+                        )
+                        f_trials.write(json.dumps(asdict(record)) + "\n")
+                        record = TrialRecord(
+                            segment=int(seg_i),
+                            trial=int(trial_i),
+                            phase="validate",
+                            params=dict(res.get("params") or {}),
+                            score=float(validate.get("score", float("-inf"))),
+                            rejected=bool(validate.get("rejected", False)),
+                            reject_reason=str(validate.get("reject_reason", "")),
+                            stats=dict(validate.get("stats") or {}),
+                            breakdown=dict(validate.get("breakdown") or {}),
+                        )
+                        f_trials.write(json.dumps(asdict(record)) + "\n")
+
+                        rejected = bool(res.get("rejected", False))
+                        if not rejected and float(selection_score) > float(
+                            best_selection_score
+                        ):
+                            best_selection_score = float(selection_score)
+                            best_params = dict(res.get("params") or {})
+                            best_train = {
+                                "score": float(train.get("score", float("-inf"))),
+                                "stats": dict(train.get("stats") or {}),
+                                "breakdown": dict(train.get("breakdown") or {}),
+                            }
+                            best_val = {
+                                "score": float(validate.get("score", float("-inf"))),
+                                "stats": dict(validate.get("stats") or {}),
+                                "breakdown": dict(validate.get("breakdown") or {}),
+                            }
+
+                # If we didn't find a feasible set, fall back to incumbent (or defaults).
+                incumbent_params = dict(fixed_params)
+                incumbent_params.update(incumbent)
+                chosen_params = dict(best_params or incumbent_params or fixed_params or {})
+                chosen_score = float(best_selection_score)
+
+                if chosen_params and incumbent_params:
+                    # Enforce improvement margin vs incumbent (optional).
+                    if float(chosen_score) < float(incumbent_selection_score) + float(
+                        tune_cfg.improvement_margin
+                    ):
+                        chosen_params = dict(incumbent_params)
+                        chosen_score = float(incumbent_selection_score)
+
+                # Evaluate out-of-sample on the test window and keep the run outputs.
+                seg_out_dir = run_dir / f"segment_{seg_i:03d}"
+                test_run_dir = seg_out_dir / "test"
+                test_run_dir.mkdir(parents=True, exist_ok=True)
+
                 warmup = _build_strategy_instance(
                     strategy_name=strategy,
                     symbols=symbols,
-                    params=full_params,
+                    params=chosen_params,
                 ).warmup_bars()
-                train_bars = _slice_bars_with_warmup(
+                test_bars = _slice_bars_with_warmup(
                     bars_by_symbol,
                     common_index,
-                    score_start=seg.train.start,
-                    score_end=seg.train.end,
+                    score_start=seg.test.start,
+                    score_end=seg.test.end,
                     warmup_bars=warmup,
                 )
                 _run_backtest_for_market(
                     market=market_enum,
-                    bars_by_symbol=train_bars,
+                    bars_by_symbol=test_bars,
                     strategy=_build_strategy_instance(
                         strategy_name=strategy,
                         symbols=symbols,
-                        params=full_params,
+                        params=chosen_params,
                     ),
                     cfg=backtest_cfg,
-                    run_dir=train_tmp,
-                    output_mode="minimal",
+                    run_dir=test_run_dir,
                 )
-                train_score = score_run(
-                    train_tmp,
+                test_score = score_run(
+                    test_run_dir,
                     objective=tune_cfg.objective,
-                    score_start=seg.train.start,
-                    score_end=seg.train.end,
+                    score_start=seg.test.start,
+                    score_end=seg.test.end,
                 )
 
-                val_bars = _slice_bars_with_warmup(
-                    bars_by_symbol,
-                    common_index,
-                    score_start=seg.validate.start,
-                    score_end=seg.validate.end,
-                    warmup_bars=warmup,
-                )
-                _run_backtest_for_market(
-                    market=market_enum,
-                    bars_by_symbol=val_bars,
-                    strategy=_build_strategy_instance(
-                        strategy_name=strategy,
-                        symbols=symbols,
-                        params=full_params,
-                    ),
-                    cfg=backtest_cfg,
-                    run_dir=val_tmp,
-                    output_mode="minimal",
-                )
-                val_score = score_run(
-                    val_tmp,
-                    objective=tune_cfg.objective,
-                    score_start=seg.validate.start,
-                    score_end=seg.validate.end,
-                )
-
-                # Selection score: favor validation, but require it isn't a train-only mirage.
-                selection_score = 0.25 * float(train_score.score) + 0.75 * float(
-                    val_score.score
-                )
-
+                # Also record one row for test in trials log (trial=-1).
                 record = TrialRecord(
                     segment=int(seg_i),
-                    trial=int(trial_i),
-                    phase="train",
-                    params=dict(full_params),
-                    score=float(train_score.score),
-                    rejected=bool(train_score.rejected),
-                    reject_reason=str(train_score.reason or ""),
-                    stats=asdict(train_score.stats),
-                    breakdown=dict(train_score.breakdown),
-                )
-                f_trials.write(json.dumps(asdict(record)) + "\n")
-                record = TrialRecord(
-                    segment=int(seg_i),
-                    trial=int(trial_i),
-                    phase="validate",
-                    params=dict(full_params),
-                    score=float(val_score.score),
-                    rejected=bool(val_score.rejected),
-                    reject_reason=str(val_score.reason or ""),
-                    stats=asdict(val_score.stats),
-                    breakdown=dict(val_score.breakdown),
+                    trial=-1,
+                    phase="test",
+                    params=dict(chosen_params),
+                    score=float(test_score.score),
+                    rejected=bool(test_score.rejected),
+                    reject_reason=str(test_score.reason or ""),
+                    stats=asdict(test_score.stats),
+                    breakdown=dict(test_score.breakdown),
                 )
                 f_trials.write(json.dumps(asdict(record)) + "\n")
 
-                # Prefer candidates that pass both windows.
-                rejected = bool(train_score.rejected or val_score.rejected)
-                if not rejected and float(selection_score) > float(best_selection_score):
-                    best_selection_score = float(selection_score)
-                    best_params = dict(full_params)
-                    best_train = {
-                        "score": float(train_score.score),
-                        "stats": asdict(train_score.stats),
-                        "breakdown": dict(train_score.breakdown),
-                    }
-                    best_val = {
-                        "score": float(val_score.score),
-                        "stats": asdict(val_score.stats),
-                        "breakdown": dict(val_score.breakdown),
-                    }
+                selection = SegmentSelection(
+                    segment=int(seg_i),
+                    params=dict(chosen_params),
+                    selection_score=float(chosen_score),
+                    train=dict(best_train or {}),
+                    validate=dict(best_val or {}),
+                    test={
+                        "score": float(test_score.score),
+                        "rejected": bool(test_score.rejected),
+                        "reject_reason": str(test_score.reason or ""),
+                        "stats": asdict(test_score.stats),
+                        "breakdown": dict(test_score.breakdown),
+                        "run_dir": str(test_run_dir),
+                    },
+                )
+                selections.append(selection)
+                incumbent = dict(chosen_params)
 
                 if on_progress is not None:
                     on_progress(
                         TuneProgress(
                             segment=int(seg_i),
                             n_segments=int(len(segments)),
-                            trial=int(trial_i + 1),
+                            trial=int(tune_cfg.trials_per_segment),
                             trials_per_segment=int(tune_cfg.trials_per_segment),
-                            phase="search",
-                            best_selection_score=float(best_selection_score),
-                            best_params=dict(best_params or {}),
-                            last_score=float(selection_score),
-                            last_rejected=bool(rejected),
-                            last_reject_reason=str(
-                                train_score.reason or val_score.reason or ""
-                            ),
+                            phase="segment_done",
+                            best_selection_score=float(chosen_score),
+                            best_params=dict(chosen_params),
+                            last_score=float(test_score.score),
+                            last_rejected=bool(test_score.rejected),
+                            last_reject_reason=str(test_score.reason or ""),
                         )
                     )
 
-            # If we didn't find a feasible set, fall back to incumbent (or defaults).
-            incumbent_params = dict(fixed_params)
-            incumbent_params.update(incumbent)
-            chosen_params = dict(best_params or incumbent_params or fixed_params or {})
-            chosen_score = float(best_selection_score)
+                shutil.rmtree(seg_tmp_dir, ignore_errors=True)
 
-            if chosen_params and incumbent_params:
-                # Enforce improvement margin vs incumbent (optional).
-                if float(chosen_score) < float(incumbent_selection_score) + float(
-                    tune_cfg.improvement_margin
-                ):
-                    chosen_params = dict(incumbent_params)
-                    chosen_score = float(incumbent_selection_score)
-
-            # Evaluate out-of-sample on the test window and keep the run outputs.
-            seg_out_dir = run_dir / f"segment_{seg_i:03d}"
-            test_run_dir = seg_out_dir / "test"
-            test_run_dir.mkdir(parents=True, exist_ok=True)
-
-            warmup = _build_strategy_instance(
-                strategy_name=strategy,
-                symbols=symbols,
-                params=chosen_params,
-            ).warmup_bars()
-            test_bars = _slice_bars_with_warmup(
-                bars_by_symbol,
-                common_index,
-                score_start=seg.test.start,
-                score_end=seg.test.end,
-                warmup_bars=warmup,
-            )
-            _run_backtest_for_market(
-                market=market_enum,
-                bars_by_symbol=test_bars,
-                strategy=_build_strategy_instance(
-                    strategy_name=strategy,
-                    symbols=symbols,
-                    params=chosen_params,
-                ),
-                cfg=backtest_cfg,
-                run_dir=test_run_dir,
-            )
-            test_score = score_run(
-                test_run_dir,
-                objective=tune_cfg.objective,
-                score_start=seg.test.start,
-                score_end=seg.test.end,
-            )
-
-            # Also record one row for test in trials log (trial=-1).
-            record = TrialRecord(
-                segment=int(seg_i),
-                trial=-1,
-                phase="test",
-                params=dict(chosen_params),
-                score=float(test_score.score),
-                rejected=bool(test_score.rejected),
-                reject_reason=str(test_score.reason or ""),
-                stats=asdict(test_score.stats),
-                breakdown=dict(test_score.breakdown),
-            )
-            f_trials.write(json.dumps(asdict(record)) + "\n")
-
-            selection = SegmentSelection(
-                segment=int(seg_i),
-                params=dict(chosen_params),
-                selection_score=float(chosen_score),
-                train=dict(best_train or {}),
-                validate=dict(best_val or {}),
-                test={
-                    "score": float(test_score.score),
-                    "rejected": bool(test_score.rejected),
-                    "reject_reason": str(test_score.reason or ""),
-                    "stats": asdict(test_score.stats),
-                    "breakdown": dict(test_score.breakdown),
-                    "run_dir": str(test_run_dir),
-                },
-            )
-            selections.append(selection)
-            incumbent = dict(chosen_params)
-
-            if on_progress is not None:
-                on_progress(
-                    TuneProgress(
-                        segment=int(seg_i),
-                        n_segments=int(len(segments)),
-                        trial=int(tune_cfg.trials_per_segment),
-                        trials_per_segment=int(tune_cfg.trials_per_segment),
-                        phase="segment_done",
-                        best_selection_score=float(chosen_score),
-                        best_params=dict(chosen_params),
-                        last_score=float(test_score.score),
-                        last_rejected=bool(test_score.rejected),
-                        last_reject_reason=str(test_score.reason or ""),
-                    )
-                )
-
-            shutil.rmtree(seg_tmp_dir, ignore_errors=True)
-
-    elapsed_s = time.perf_counter() - t0
+        elapsed_s = time.perf_counter() - t0
+    finally:
+        if executor is not None:
+            executor.shutdown(cancel_futures=True)
 
     stability = _stability_summary(selections)
     (run_dir / "selections.json").write_text(

@@ -436,6 +436,10 @@ def tune(
     ),
     allow_short: bool = typer.Option(True, help="Allow negative exposure"),
     trials_per_segment: int = typer.Option(60, help="Random trials per walk-forward segment"),
+    jobs: int = typer.Option(
+        1,
+        help="Parallel worker processes for trials (1=disable, 0=auto).",
+    ),
     seed: int = typer.Option(7, help="RNG seed"),
     train: str = typer.Option("30d", help="Train window size (e.g. 30d)"),
     validate: str = typer.Option("7d", help="Validation window size (e.g. 7d)"),
@@ -504,6 +508,7 @@ def tune(
     )
     tune_cfg = TuneConfig(
         trials_per_segment=int(trials_per_segment),
+        jobs=int(jobs),
         seed=int(seed),
         drift_frac=None if (drift_frac is None or float(drift_frac) == 0.0) else float(drift_frac),
         improvement_margin=float(improvement_margin),

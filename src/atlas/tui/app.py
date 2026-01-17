@@ -73,6 +73,7 @@ class TuiState:
     paper_limit_offset_bps: float = 5.0
     paper_dry_run: bool = False
     tune_trials_per_segment: int = 60
+    tune_jobs: int = 1
     tune_seed: int = 7
     tune_train: str = "30d"
     tune_validate: str = "7d"
@@ -910,7 +911,7 @@ class AtlasTui(App):
         if cmd == "/algorithm":
             return list_strategy_names()
         if cmd == "/tune":
-            return ["start", "stop", "apply", "trials", "seed", "train", "validate", "test", "step", "drift", "margin"]
+            return ["start", "stop", "apply", "trials", "jobs", "seed", "train", "validate", "test", "step", "drift", "margin"]
         if cmd == "/param":
             strategy = self._canonicalize_strategy_name(self.state.strategy)
             spec = self._strategy_param_spec(strategy)
@@ -1124,7 +1125,7 @@ class AtlasTui(App):
             self._write_log(
                 "commands: /stock, /crypto, /backtest, /paper start|stop, /timeframe <7d|6h|1m|1y|clear>, "
                 "/bar <1Min|5Min|30Min|60Min|4H>, /algorithm <name>, /data <sample|csv|alpaca|coinbase>, "
-                "/tune start|stop|apply|trials|seed|train|validate|test|step|drift|margin, "
+                "/tune start|stop|apply|trials|jobs|seed|train|validate|test|step|drift|margin, "
                 "/param <key> <value>, /params, "
                 "/fast <int>, /slow <int>, /cash <usd> (/initialcash <usd>), /maxnotional <usd>, /slippage <bps>, /short <true|false>, /debug <true|false>, "
                 "/feed <iex|delayed_sip|sip>, /paperfeed <iex|delayed_sip|sip>, /csv <path>, "
@@ -1565,7 +1566,7 @@ class AtlasTui(App):
 
             if len(args) != 2:
                 self._write_log(
-                    "tune usage: /tune start|stop|apply OR /tune trials|seed|train|validate|test|step|drift|margin <value>"
+                    "tune usage: /tune start|stop|apply OR /tune trials|jobs|seed|train|validate|test|step|drift|margin <value>"
                 )
                 return
 
@@ -1581,6 +1582,19 @@ class AtlasTui(App):
                     self._write_log("tune trials must be > 0")
                     return
                 self.state.tune_trials_per_segment = value
+            elif key == "jobs":
+                if value_raw.strip().lower() == "auto":
+                    value = 0
+                else:
+                    try:
+                        value = int(value_raw)
+                    except ValueError:
+                        self._write_log("tune jobs must be an integer (or 'auto')")
+                        return
+                if int(value) < 0:
+                    self._write_log("tune jobs must be >= 0 (0=auto)")
+                    return
+                self.state.tune_jobs = int(value)
             elif key == "seed":
                 try:
                     self.state.tune_seed = int(value_raw)
@@ -1619,7 +1633,9 @@ class AtlasTui(App):
                     return
                 self.state.tune_improvement_margin = float(value)
             else:
-                self._write_log("unknown tune setting (use: trials, seed, train, validate, test, step, drift, margin)")
+                self._write_log(
+                    "unknown tune setting (use: trials, jobs, seed, train, validate, test, step, drift, margin)"
+                )
                 return
 
             self._render_settings()
@@ -1753,6 +1769,10 @@ class AtlasTui(App):
             Text("true", style="green") if (self._tune_thread is not None) else Text("false", style="red"),
         )
         table.add_row("tune_trials", str(self.state.tune_trials_per_segment))
+        table.add_row(
+            "tune_jobs",
+            "auto" if int(self.state.tune_jobs) == 0 else str(int(self.state.tune_jobs)),
+        )
         table.add_row("tune_seed", str(self.state.tune_seed))
         table.add_row(
             "tune_windows",
@@ -2861,6 +2881,7 @@ class AtlasTui(App):
                 )
                 tune_cfg = TuneConfig(
                     trials_per_segment=int(snapshot.get("tune_trials_per_segment", 60)),
+                    jobs=int(snapshot.get("tune_jobs", 1)),
                     seed=int(snapshot.get("tune_seed", 7)),
                     drift_frac=(
                         None
