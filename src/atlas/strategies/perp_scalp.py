@@ -245,7 +245,8 @@ class PerpScalp(Strategy):
             if df is None or len(df) < self.warmup_bars():
                 continue
 
-            df = df.sort_index()
+            if not df.index.is_monotonic_increasing:
+                df = df.sort_index()
             high = df["high"].astype(float)
             low = df["low"].astype(float)
             close = df["close"].astype(float)
@@ -561,4 +562,3 @@ class PerpScalp(Strategy):
             "per": per,
         }
         return StrategyDecision(target_exposures=exposures, reason=reason, debug=debug)
-

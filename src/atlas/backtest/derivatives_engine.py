@@ -33,6 +33,7 @@ def run_derivatives_backtest(
     progress: Optional[Callable[[BacktestProgress], None]] = None,
     progress_interval_s: float = 0.25,
     debug: bool = False,
+    output_mode: str = "full",
 ) -> BacktestOutputs:
     """
     Derivatives-specific backtest engine.
@@ -42,9 +43,16 @@ def run_derivatives_backtest(
     - Funding Rate storage/passing (simulated as 0 if not provided, or loaded)
     - Shorting allowed by default
     """
+    mode = (output_mode or "full").strip().lower()
+    if mode not in {"full", "minimal"}:
+        raise ValueError(f"unsupported output_mode: {output_mode!r} (expected 'full' or 'minimal')")
+
     run_dir.mkdir(parents=True, exist_ok=True)
     decisions_jsonl = run_dir / "decisions.jsonl"
     trade_debug_jsonl = run_dir / "trade_debug.jsonl"
+    write_decisions = (mode == "full")
+    write_trades_json = (mode == "full")
+    write_metrics_json = (mode == "full")
 
     cash = float(cfg.initial_cash)
     symbols = [s.strip().upper() for s in cfg.symbols if s.strip()]
@@ -68,6 +76,9 @@ def run_derivatives_backtest(
     
     # Reindex bars
     bars_by_symbol = {s: bars_by_symbol[s].loc[common_index].copy() for s in symbols}
+
+    open_by_symbol = {s: bars_by_symbol[s]["open"].to_numpy(copy=False) for s in symbols}
+    close_by_symbol = {s: bars_by_symbol[s]["close"].to_numpy(copy=False) for s in symbols}
     
     # State initialization
     position_qty: dict[str, float] = {s: 0.0 for s in symbols}
@@ -83,7 +94,7 @@ def run_derivatives_backtest(
     prev_closes: dict[str, float] = {}
     for s in symbols:
         b = bars_by_symbol[s]
-        prev_closes[s] = float(b["close"].iloc[0])
+        prev_closes[s] = float(close_by_symbol[s][0])
         if "funding_rate" in b.columns:
             try:
                 prev_funding_rates[s] = float(b["funding_rate"].iloc[0] or 0.0)
@@ -128,13 +139,15 @@ def run_derivatives_backtest(
         return out
 
     with ExitStack() as stack:
-        f_decisions = stack.enter_context(decisions_jsonl.open("w"))
+        f_decisions = (
+            stack.enter_context(decisions_jsonl.open("w")) if write_decisions else None
+        )
         f_trade_debug = stack.enter_context(trade_debug_jsonl.open("w")) if debug else None
 
         for i in range(len(idx)):
             ts = pd.Timestamp(idx[i])
-            opens = {s: float(bars_by_symbol[s]["open"].iloc[i]) for s in symbols}
-            closes = {s: float(bars_by_symbol[s]["close"].iloc[i]) for s in symbols}
+            opens = {s: float(open_by_symbol[s][i]) for s in symbols}
+            closes = {s: float(close_by_symbol[s][i]) for s in symbols}
             execution_bars = (
                 {s: _bar_snapshot(bars_by_symbol[s], row_i=i) for s in symbols}
                 if debug
@@ -609,7 +622,8 @@ def run_derivatives_backtest(
                         "debug": decision.debug,
                         "snapshot": decision_row["snapshot"],
                     }
-                f_decisions.write(json.dumps(decision_row) + "\n")
+                if f_decisions is not None:
+                    f_decisions.write(json.dumps(decision_row) + "\n")
 
     # Output generation
     trade_cols = [
@@ -626,12 +640,13 @@ def run_derivatives_backtest(
         equity_curve = equity_curve.drop(columns=["timestamp"])
         equity_curve.index.name = "timestamp"
 
-    metrics = compute_metrics(equity_curve, trades)
-    
     trades.to_csv(run_dir / "trades.csv", index=False)
-    trades.to_json(run_dir / "trades.json", orient="records", indent=2)
     equity_curve.to_csv(run_dir / "equity_curve.csv", index=True)
-    (run_dir / "metrics.json").write_text(json.dumps(metrics.to_dict(), indent=2))
+    if write_trades_json:
+        trades.to_json(run_dir / "trades.json", orient="records", indent=2)
+    if write_metrics_json:
+        metrics = compute_metrics(equity_curve, trades)
+        (run_dir / "metrics.json").write_text(json.dumps(metrics.to_dict(), indent=2))
     
     logger.info(f"Derivatives backtest done. Final Eq: {equity:.2f}")
 

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import time
 from typing import Any, Optional
 
+import numpy as np
 import pandas as pd
 
 from atlas.strategies.base import Strategy, StrategyDecision, StrategyState
@@ -32,11 +33,22 @@ def _infer_bar_minutes(index: pd.DatetimeIndex) -> float:
     """
     if len(index) < 3:
         return 1.0
-    diffs = index.to_series().diff().dropna().dt.total_seconds() / 60.0
-    diffs = diffs[(diffs > 0) & (diffs < 60)]  # drop session gaps
-    if len(diffs) == 0:
+    # Fast path: use the nanosecond representation for cheap diffs.
+    try:
+        diffs_ns = np.diff(index.asi8)
+    except Exception:
+        diffs = index.to_series().diff().dropna().dt.total_seconds() / 60.0
+        diffs = diffs[(diffs > 0) & (diffs < 60)]  # drop session gaps
+        if len(diffs) == 0:
+            return 1.0
+        median = float(diffs.median())
+        return median if median > 0 else 1.0
+
+    diffs_min = diffs_ns.astype("float64") / (60.0 * 1e9)
+    diffs_min = diffs_min[(diffs_min > 0.0) & (diffs_min < 60.0)]  # drop session gaps
+    if diffs_min.size == 0:
         return 1.0
-    median = float(diffs.median())
+    median = float(np.median(diffs_min))
     return median if median > 0 else 1.0
 
 
@@ -214,14 +226,22 @@ class OrbTrend(Strategy):
             info["reason_tag"] = "insufficient_bars"
             return False, info
 
-        df = df.sort_index()
+        owns_df = False
+        if not df.index.is_monotonic_increasing:
+            df = df.sort_index()
+            owns_df = True
+
         idx_ny = df.index
         if idx_ny.tz is None:
-            idx_ny = idx_ny.tz_localize(NY_TZ)
-        else:
-            idx_ny = idx_ny.tz_convert(NY_TZ)
-        df = df.copy()
-        df.index = idx_ny
+            if not owns_df:
+                df = df.copy()
+                owns_df = True
+            df.index = idx_ny.tz_localize(NY_TZ)
+        elif str(idx_ny.tz) != str(NY_TZ):
+            if not owns_df:
+                df = df.copy()
+                owns_df = True
+            df.index = idx_ny.tz_convert(NY_TZ)
 
         bar_minutes = _infer_bar_minutes(df.index)
         info["bar_minutes"] = float(bar_minutes)
@@ -346,14 +366,22 @@ class OrbTrend(Strategy):
             info["reason_tag"] = "missing_bars_exit"
             return True, info
 
-        df = df.sort_index()
+        owns_df = False
+        if not df.index.is_monotonic_increasing:
+            df = df.sort_index()
+            owns_df = True
+
         idx_ny = df.index
         if idx_ny.tz is None:
-            idx_ny = idx_ny.tz_localize(NY_TZ)
-        else:
-            idx_ny = idx_ny.tz_convert(NY_TZ)
-        df = df.copy()
-        df.index = idx_ny
+            if not owns_df:
+                df = df.copy()
+                owns_df = True
+            df.index = idx_ny.tz_localize(NY_TZ)
+        elif str(idx_ny.tz) != str(NY_TZ):
+            if not owns_df:
+                df = df.copy()
+                owns_df = True
+            df.index = idx_ny.tz_convert(NY_TZ)
 
         bar_minutes = _infer_bar_minutes(df.index)
         session_start = self._session_start(decision_ts_ny)
