@@ -1894,6 +1894,7 @@ class AtlasTui(App):
         results.border_title = "Paper (live)"
 
         now = pd.Timestamp.now(tz=NY_TZ)
+        reason = str(decision.get("reason") or "-")
         decision_ts_raw = str(decision.get("timestamp", "")) or ""
         decision_ts: Optional[pd.Timestamp]
         try:
@@ -1923,11 +1924,18 @@ class AtlasTui(App):
         )
 
         mkt = parse_market(self.state.market)
-        feed_label = (
-            f"{self.state.paper_feed} (ignored in crypto)"
-            if mkt == Market.CRYPTO
-            else self.state.paper_feed
-        )
+        if mkt == Market.CRYPTO:
+            bars_label = "Alpaca crypto (paper_feed ignored)"
+        else:
+            bars_label = f"Alpaca stocks (feed={self.state.paper_feed})"
+
+        reason_style = "cyan"
+        if reason in {"enter", "hold"}:
+            reason_style = "green"
+        elif reason in {"no_trade", "outside_rth", "entry_cutoff", "long_only_abstain"}:
+            reason_style = "yellow"
+        elif reason in {"kill_switch", "daily_loss_limit", "risk_disabled", "forced_flat"}:
+            reason_style = "red"
 
         equity_rows: list[dict[str, str]] = []
         if self._paper_run_dir:
@@ -2011,6 +2019,91 @@ class AtlasTui(App):
             ),
         )
 
+        decision_banner = Table.grid(expand=True)
+        decision_banner.add_column(ratio=3)
+        decision_banner.add_column(ratio=5)
+        reason_display = reason.replace("_", " ").upper()
+        decision_banner.add_row(
+            Text(f"Reason: {reason_display}", style=f"bold {reason_style}"),
+            Text(f"Bars: {bars_label}", style="dim"),
+        )
+        if decision_ts is not None:
+            decision_banner.add_row(
+                Text(
+                    f"Decision: {decision_ts.strftime('%Y-%m-%d %H:%M:%S %Z')}",
+                    style="dim",
+                ),
+                Text(
+                    f"Age: {since_decision_s:,.1f}s" if since_decision_s is not None else "",
+                    style="dim",
+                ),
+            )
+
+        no_trade_breakdown: Optional[Table] = None
+        cand_rows: list[tuple[str, str, str]] = []
+        params = self.state.strategy_params.get(self.state.strategy, {}) or {}
+        for key, raw in debug.items():
+            if not (isinstance(key, str) and key.startswith("cand_") and isinstance(raw, dict)):
+                continue
+            sym = str(raw.get("symbol") or key[len("cand_") :]).strip().upper()
+            tag = str(raw.get("reason_tag") or "-")
+
+            detail = ""
+            if tag == "gate_er":
+                try:
+                    er = float(raw.get("er") or 0.0)
+                except Exception:
+                    er = 0.0
+                er_min = params.get("er_min")
+                if er_min is not None:
+                    try:
+                        detail = f"er={er:.2f} < {float(er_min):.2f}"
+                    except Exception:
+                        detail = f"er={er:.2f}"
+                else:
+                    detail = f"er={er:.2f}"
+            elif tag == "no_breakout":
+                parts: list[str] = []
+                for k in ("close", "vwap", "th_up", "th_dn"):
+                    v = raw.get(k)
+                    if v is None:
+                        continue
+                    try:
+                        parts.append(f"{k}={float(v):.2f}")
+                    except Exception:
+                        continue
+                detail = "  ".join(parts)
+            elif tag == "net_edge_not_positive":
+                v = raw.get("net_edge_bps")
+                if v is not None:
+                    try:
+                        detail = f"net_edge_bps={float(v):+.2f}"
+                    except Exception:
+                        detail = ""
+            elif tag == "orb_not_ready":
+                orb_end = raw.get("orb_end")
+                if orb_end:
+                    detail = f"orb_end={orb_end}"
+
+            cand_rows.append((sym, tag, detail))
+
+        if reason in {"no_trade", "long_only_abstain"} and cand_rows:
+            cand_rows.sort(key=lambda r: r[0])
+            breakdown = Table(box=box.SIMPLE, show_header=True, header_style="bold")
+            breakdown.add_column("symbol", style="bold")
+            breakdown.add_column("tag")
+            breakdown.add_column("detail")
+            for sym, tag, detail in cand_rows:
+                style = "cyan"
+                if tag in {"candidate_ok"}:
+                    style = "green"
+                elif tag in {"gate_er", "no_breakout", "confirm_wait", "orb_not_ready"}:
+                    style = "yellow"
+                elif tag in {"insufficient_bars", "too_few_today"}:
+                    style = "red"
+                breakdown.add_row(sym, Text(tag, style=style), Text(detail or "-", style="dim"))
+            no_trade_breakdown = breakdown
+
         last_orders = []
         last_fills = []
         if self._paper_run_dir:
@@ -2028,14 +2121,6 @@ class AtlasTui(App):
         meta.add_row("strategy", self.state.strategy)
         meta.add_row("symbols", self.state.symbols)
         meta.add_row("bar_timeframe", self.state.bar_timeframe)
-        meta.add_row("lookback", str(self.state.paper_lookback_bars))
-        meta.add_row("poll_s", str(self.state.paper_poll_seconds))
-        meta.add_row("dry_run", str(self.state.paper_dry_run))
-        meta.add_row("feed", feed_label)
-        meta.add_row("rth_only", str(self.state.paper_regular_hours_only))
-        meta.add_row("when_closed", str(self.state.paper_allow_trading_when_closed))
-        meta.add_row("limit_bps", f"{self.state.paper_limit_offset_bps:.2f}")
-        meta.add_row("reason", str(decision.get("reason") or "-"))
         if decision_ts is not None:
             meta.add_row("decision_ts", decision_ts.isoformat())
         if since_decision_s is not None:
@@ -2131,11 +2216,16 @@ class AtlasTui(App):
             padding=(1, 2),
         )
 
+        decision_group_items: list[object] = [decision_banner]
+        if no_trade_breakdown is not None:
+            decision_group_items.extend(["", no_trade_breakdown])
+        decision_group_items.extend(["", meta])
+
         results.update(
             Group(
                 kpis,
                 "",
-                Panel(meta, title="State", border_style="cyan", box=box.ROUNDED),
+                Panel(Group(*decision_group_items), title="Decision", border_style="cyan", box=box.ROUNDED),
                 "",
                 Panel(pos_table, title="Targets / Positions", border_style="magenta", box=box.ROUNDED),
                 "",
