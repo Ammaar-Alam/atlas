@@ -8,10 +8,6 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
-from alpaca.data.enums import DataFeed
-from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
-from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from atlas.config import AlpacaSettings
 from atlas.data.bars import BarTimeframe, parse_bar_timeframe
@@ -45,7 +41,7 @@ def _bars_cache_path(root: Path, req: AlpacaBarsDownload) -> Path:
 
 @dataclass(frozen=True)
 class AlpacaFeedConfig:
-    api_feed: DataFeed
+    api_feed: object
     cache_label: str
     min_end_delay_minutes: int = 0
 
@@ -59,6 +55,14 @@ def parse_alpaca_feed(value: str) -> AlpacaFeedConfig:
     """
     raw = value.strip()
     normalized = " ".join(raw.split()).lower().replace("-", "_").replace(" ", "_")
+
+    try:
+        from alpaca.data.enums import DataFeed
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Alpaca support requires the optional 'alpaca-py' dependency. "
+            "Install it (e.g. `pip install alpaca-py`) to use data_source=alpaca or paper trading."
+        ) from exc
 
     if normalized == "iex":
         return AlpacaFeedConfig(api_feed=DataFeed.IEX, cache_label="iex", min_end_delay_minutes=0)
@@ -76,6 +80,14 @@ def to_alpaca_timeframe(tf: BarTimeframe) -> TimeFrame:
     Alpaca supports hour-based timeframes natively; using Hour units for exact
     hour multiples avoids relying on "N minutes" support for larger windows.
     """
+    try:
+        from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Alpaca support requires the optional 'alpaca-py' dependency. "
+            "Install it (e.g. `pip install alpaca-py`) to use data_source=alpaca or paper trading."
+        ) from exc
+
     minutes = int(tf.minutes)
     if minutes <= 0:
         raise ValueError("bar timeframe minutes must be > 0")
@@ -145,6 +157,14 @@ def _to_utc(dt: datetime) -> datetime:
 
 
 def _make_crypto_client(settings: AlpacaSettings) -> CryptoHistoricalDataClient:
+    try:
+        from alpaca.data.historical import CryptoHistoricalDataClient
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Alpaca support requires the optional 'alpaca-py' dependency. "
+            "Install it (e.g. `pip install alpaca-py`) to use data_source=alpaca or paper trading."
+        ) from exc
+
     kwargs: dict[str, object] = {}
     if settings.api_key and settings.secret_key:
         kwargs["api_key"] = settings.api_key
@@ -168,6 +188,16 @@ def download_stock_bars_to_csv(
     out_path: Optional[Path],
     feed: str = "delayed_sip",
 ) -> Path:
+    try:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.enums import DataFeed
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Alpaca support requires the optional 'alpaca-py' dependency. "
+            "Install it (e.g. `pip install alpaca-py`) to download stock bars."
+        ) from exc
+
     tf = parse_bar_timeframe(timeframe)
     feed_cfg = parse_alpaca_feed(feed)
     end = _clamp_end_for_feed(end, delay_minutes=feed_cfg.min_end_delay_minutes)
@@ -217,6 +247,14 @@ def download_crypto_bars_to_csv(
     timeframe: str,
     out_path: Optional[Path],
 ) -> Path:
+    try:
+        from alpaca.data.requests import CryptoBarsRequest
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Alpaca support requires the optional 'alpaca-py' dependency. "
+            "Install it (e.g. `pip install alpaca-py`) to download crypto bars."
+        ) from exc
+
     tf = parse_bar_timeframe(timeframe)
     start_utc = _to_utc(start)
     end_utc = _to_utc(end)

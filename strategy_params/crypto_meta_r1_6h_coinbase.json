@@ -1,0 +1,15 @@
+{
+  "crypto_meta": {
+    "market_symbol": "BTC/USD",
+    "regime_mom_bars": 168,
+    "regime_mom_threshold": 0.0,
+    "regime_er_bars": 84,
+    "regime_er_min": 0.25,
+    "rotation_weight_trending": 1.0,
+    "rotation_weight_ranging": 0.0,
+    "ensemble_params_file": "strategy_params/crypto_ensemble_ultra_6h_coinbase_heartbeat.json",
+    "rotation_params_file": "strategy_params/crypto_rotation_2022_candidate_r2_momfilter_v11_6h_coinbase_nohb.json",
+    "ensemble_symbols": "BTC/USD,ETH/USD",
+    "rotation_symbols": ""
+  }
+}

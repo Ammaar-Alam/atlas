@@ -1,0 +1,29 @@
+{
+  "crypto_regime_vol_target": {
+    "market_symbol": "BTC/USD",
+    "fast_window": 15,
+    "slow_window": 102,
+    "regime_window": 215,
+    "regime_slope_bars": 3,
+    "momentum_window_bars": 98,
+    "atr_window": 12,
+    "top_k": 2,
+    "target_vol_bps_per_bar": 35.394,
+    "max_total_exposure": 1.3562,
+    "max_exposure_per_symbol": 0.31425,
+    "rebalance_interval_bars": 3,
+    "rebalance_exposure_threshold": 0.10192499999999999,
+    "min_trade_notional_usd": 25.0,
+    "market_drawdown_reduce": 0.1568,
+    "market_drawdown_off": 0.23107499999999997,
+    "market_peak_lookback_bars": 111,
+    "weekly_loss_limit": 0.0320625,
+    "enable_weekly_profit_lock": true,
+    "weekly_profit_target": 0.0591,
+    "daily_loss_limit": 0.0582,
+    "kill_switch": 0.1522,
+    "kill_switch_cooldown_days": 9,
+    "trailing_stop_pct": 0.17820000000000003,
+    "min_hold_bars": 11
+  }
+}

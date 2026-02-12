@@ -62,9 +62,10 @@ Full-screen Textual-based dashboard with real-time metrics, position tracking, a
 
 ### 📊 Multi-Asset Backtesting
 
-- Minute-level bars (1m, 5m, 30m)
+- Minute-to-daily bars (1m, 5m, 15m, 30m, 1H, 6H, 1D)
 - Equity engine with simple fill model
 - **Derivatives engine** with taker fees, funding rate accrual, margin calculations, and liquidation simulation
+- Crypto/equity backtests support per-side slippage + taker fee modeling
 
 ### 🔧 Walk-Forward Optimization
 
@@ -100,6 +101,20 @@ Uses bundled sample data in `data/sample/`:
 atlas backtest --symbol SPY --data-source sample
 ```
 
+### 2b. Crypto Spot Backtest + Walk-Forward Validation (Coinbase public market data)
+
+Backtest:
+
+```bash
+atlas backtest --market crypto --symbols BTC/USD,ETH/USD --data-source coinbase --bar-timeframe 6H --start 2018-01-01T00:00:00Z --end 2026-01-01T00:00:00Z --strategy crypto_tsm --strategy-params strategy_params/crypto_tsm_stable_6h_coinbase.json --slippage-bps 3 --taker-fee-bps 25
+```
+
+Walk-forward validation with a cost grid (recommended before tuning):
+
+```bash
+atlas validate --market crypto --symbols BTC/USD,ETH/USD --data-source coinbase --bar-timeframe 6H --start 2018-01-01T00:00:00Z --end 2026-01-01T00:00:00Z --strategy crypto_tsm --strategy-params strategy_params/crypto_tsm_stable_6h_coinbase.json --train 365d --validate-window 90d --test 90d --step 90d --slippage-grid 3,5 --taker-fee-grid 10,20,40 --overfit-report
+```
+
 **Expected output:**
 ```
 Backtest Summary
@@ -116,7 +131,14 @@ Outputs saved to `outputs/backtests/{run_id}/`:
 - `trades.csv` / `trades.json` — individual trade records
 - `equity_curve.csv` — per-bar equity snapshots
 - `metrics.json` — summary statistics
+- `equity_vs_spy.us.csv` / `equity_vs_spy.us.png` — normalized equity vs SPY benchmark (best-effort)
 - `run.log` — execution log
+
+You can also (re)generate plots for an existing run directory:
+
+```bash
+atlas plot-run outputs/backtests/<run_id>
+```
 
 ### 3. Launch the Terminal UI
 
@@ -167,14 +189,20 @@ The TUI is a full-featured terminal dashboard built with [Textual](https://githu
 | `/tune` | Run walk-forward parameter optimization | `/tune` |
 | `/paper start` | Start paper trading loop | `/paper start` |
 | `/paper stop` | Stop paper trading | `/paper stop` |
-| `/market` | Set market mode | `/market derivatives` |
-| `/symbol` | Set trading symbol(s) | `/symbol BTC-PERP,ETH-PERP` |
+| `/stock` | Set market mode to equities | `/stock` |
+| `/crypto` | Set market mode to spot crypto | `/crypto` |
+| `/derivative` | Set market mode to derivatives | `/derivative` |
+| `/symbol` | Set a single symbol | `/symbol BTC/USD` |
+| `/symbols` | Set multiple symbols | `/symbols BTC/USD,ETH/USD` |
 | `/data` | Set data source | `/data coinbase` |
 | `/algorithm` | Select trading strategy | `/algorithm hedge` |
 | `/timeframe` | Set backtest window | `/timeframe 30d` |
 | `/bar` | Set bar timeframe | `/bar 5Min` |
 | `/cash` | Set initial capital | `/cash 10000` |
 | `/param` | Set strategy parameter | `/param edge_horizon_hours 6` |
+| `/preset` | Load a strategy preset from `strategy_params/` (and apply `atlas_profile` if present) | `/preset crypto_tsm_stable_6h_coinbase` |
+| `/slippage` | Set per-side slippage (bps) | `/slippage 5` |
+| `/takerfee` | Set taker fee (bps) | `/takerfee 20` |
 | `/save` | Save current configuration | `/save` |
 | `/load` | Load saved configuration | `/load` |
 
@@ -184,6 +212,35 @@ Supports relative and absolute time specifications:
 - Relative: `6h`, `1d`, `7d`, `30d`, `1y`
 - Absolute: `2024-01-01T09:30:00-05:00`
 - Clear: `/timeframe clear` (use all available data)
+
+### Best Coinbase Perp Preset (Current)
+
+Load the currently selected `perp_weekly_profit_chase` profile with one command:
+
+```text
+/algorithm perp_weekly_profit_chase
+/preset load perp_weekly_profit_chase_algo_profit_plus_15m_coinbase_profile
+```
+
+The preset applies:
+- `market=derivatives`
+- `data_source=coinbase`
+- `symbols=BTC/USD`
+- `bar_timeframe=15Min`
+- `timeframe=180d`
+- `initial_cash=500`
+- `max_position_notional_usd=2500`
+- `slippage_bps=1.5`
+- `taker_fee_bps=6.0`
+- `allow_short=true`
+
+Before running live, override `taker_fee_bps` to your account's current Coinbase tier:
+
+```text
+/takerfee <your_current_coinbase_taker_bps>
+```
+
+Note: `data_source=coinbase` is currently for market data/backtests. The built-in `/paper` execution path routes orders through Alpaca.
 
 ---
 
@@ -201,6 +258,13 @@ Simple implementations for sanity-checking the backtest infrastructure:
 | `ema_crossover` | Exponential moving average variant |
 | `spy_open_close` | Buy at open, sell at close |
 | `no_trade` | Benchmark strategy that never trades |
+
+### Crypto Spot Strategies
+
+| Strategy | Description |
+|----------|-------------|
+| `crypto_tsm` | Time-series momentum / trend core with risk overlays |
+| `crypto_ensemble` | Regime-gated ensemble (trend + breakout + mean-reversion) with cost-aware admission |
 
 ---
 

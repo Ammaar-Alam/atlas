@@ -26,6 +26,7 @@ class StrategyDecision:
     target_exposures: dict[str, float]
     reason: Optional[str] = None
     debug: Optional[dict[str, Any]] = None
+    execution_hints: Optional[dict[str, dict[str, Any]]] = None
 
 
 class Strategy(ABC):

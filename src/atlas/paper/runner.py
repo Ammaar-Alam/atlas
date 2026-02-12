@@ -12,8 +12,6 @@ from threading import Event
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
-from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
 
 from atlas.broker.alpaca_broker import (
     submit_limit_order,
@@ -23,7 +21,7 @@ from atlas.broker.alpaca_broker import (
 )
 from atlas.config import AlpacaSettings
 from atlas.data.alpaca_data import parse_alpaca_feed, to_alpaca_timeframe
-from atlas.data.bars import filter_regular_hours, parse_bar_timeframe
+from atlas.data.bars import filter_regular_hours, parse_bar_timeframe, resample_ohlcv
 from atlas.market import Market, coerce_symbols_for_market, parse_market
 from atlas.strategies.base import Strategy, StrategyState
 from atlas.utils.time import NY_TZ, now_ny
@@ -39,6 +37,8 @@ class PaperConfig:
     lookback_bars: int
     poll_seconds: int
     max_position_notional_usd: float
+    slippage_bps: float
+    taker_fee_bps: float
     allow_short: bool
     regular_hours_only: bool
     allow_trading_when_closed: bool
@@ -47,13 +47,25 @@ class PaperConfig:
     market: str = "equity"
 
 
-def _stock_bars_client(settings: AlpacaSettings) -> StockHistoricalDataClient:
-    return StockHistoricalDataClient(
-        settings.api_key, settings.secret_key, url_override=settings.data_url_override
-    )
+def _stock_bars_client(settings: AlpacaSettings):
+    try:
+        from alpaca.data.historical import StockHistoricalDataClient
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Paper trading requires the optional 'alpaca-py' dependency. "
+            "Install it (e.g. `pip install alpaca-py`) to use `atlas paper`."
+        ) from exc
+    return StockHistoricalDataClient(settings.api_key, settings.secret_key, url_override=settings.data_url_override)
 
 
-def _make_crypto_bars_client(settings: AlpacaSettings) -> CryptoHistoricalDataClient:
+def _make_crypto_bars_client(settings: AlpacaSettings):
+    try:
+        from alpaca.data.historical import CryptoHistoricalDataClient
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Paper trading requires the optional 'alpaca-py' dependency. "
+            "Install it (e.g. `pip install alpaca-py`) to use `atlas paper`."
+        ) from exc
     kwargs: dict[str, object] = {}
     if settings.api_key and settings.secret_key:
         kwargs["api_key"] = settings.api_key
@@ -102,6 +114,13 @@ def _fetch_recent_bars(
     feed: str,
     market: Market,
 ) -> pd.DataFrame:
+    try:
+        from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Paper trading requires the optional 'alpaca-py' dependency. "
+            "Install it (e.g. `pip install alpaca-py`) to use `atlas paper`."
+        ) from exc
     tf = parse_bar_timeframe(timeframe)
     end = now_ny()
     start = end - timedelta(minutes=max(lookback_bars * tf.minutes * 2, 10))
@@ -177,6 +196,14 @@ def run_paper_loop(
         raise ValueError("cfg.symbols must be non-empty")
     tf = parse_bar_timeframe(cfg.bar_timeframe)
 
+    fetch_timeframe = cfg.bar_timeframe
+    fetch_lookback_bars = int(cfg.lookback_bars)
+    if mkt == Market.CRYPTO and int(tf.minutes) >= 120 and int(tf.minutes) % 60 == 0:
+        # For multi-hour crypto, fetch 1H bars and resample locally to keep candle boundaries
+        # deterministic (matches `load_universe_bars` behavior used in backtests).
+        fetch_timeframe = "1H"
+        fetch_lookback_bars = int(cfg.lookback_bars * (int(tf.minutes) // 60))
+
     with (
         orders_path.open("w", newline="") as f_orders,
         orders_jsonl_path.open("w") as f_orders_jsonl,
@@ -218,9 +245,10 @@ def run_paper_loop(
         loops = 0
         last_handled_bar_open: Optional[pd.Timestamp] = None
 
-        initial_sleep = _align_to_next_bar_open(
-            pd.Timestamp.now(tz=NY_TZ), timeframe_minutes=tf.minutes
-        )
+        now_for_bins = pd.Timestamp.now(tz=NY_TZ)
+        if mkt == Market.CRYPTO:
+            now_for_bins = now_for_bins.tz_convert(ZoneInfo("UTC"))
+        initial_sleep = _align_to_next_bar_open(now_for_bins, timeframe_minutes=tf.minutes)
         if initial_sleep >= 1.0:
             logger.info("aligning to next bar open in %.1fs", initial_sleep)
             if stop_event is not None:
@@ -279,12 +307,13 @@ def run_paper_loop(
                             return
                     else:
                         time.sleep(sleep_s)
-                    continue
+                continue
 
             now = pd.Timestamp.now(tz=NY_TZ)
-            bar_open = now.floor(f"{int(tf.minutes)}min")
+            now_bins = now.tz_convert(ZoneInfo("UTC")) if mkt == Market.CRYPTO else now
+            bar_open = now_bins.floor(f"{int(tf.minutes)}min")
             if last_handled_bar_open is not None and bar_open <= last_handled_bar_open:
-                sleep_s = _align_to_next_bar_open(now, timeframe_minutes=tf.minutes)
+                sleep_s = _align_to_next_bar_open(now_bins, timeframe_minutes=tf.minutes)
                 logger.info("waiting for next bar open in %.1fs", sleep_s)
                 if stop_event is not None:
                     if stop_event.wait(sleep_s):
@@ -299,8 +328,8 @@ def run_paper_loop(
             bars_df = _fetch_recent_bars(
                 settings=settings,
                 symbols=cfg_symbols,
-                lookback_bars=cfg.lookback_bars,
-                timeframe=cfg.bar_timeframe,
+                lookback_bars=fetch_lookback_bars,
+                timeframe=fetch_timeframe,
                 feed=cfg.alpaca_feed,
                 market=mkt,
             )
@@ -326,8 +355,14 @@ def run_paper_loop(
                 df = bars_df.xs(symbol)
                 df = df[["open", "high", "low", "close", "volume"]].copy()
                 df = df.sort_index()
-                if cfg.regular_hours_only:
+                if mkt == Market.CRYPTO:
+                    df.index = df.index.tz_convert(ZoneInfo("UTC"))
+                if cfg.regular_hours_only and mkt == Market.EQUITY:
                     df = filter_regular_hours(df)
+                if len(df) > fetch_lookback_bars:
+                    df = df.iloc[-fetch_lookback_bars :]
+                if fetch_timeframe != cfg.bar_timeframe:
+                    df = resample_ohlcv(df, minutes=int(tf.minutes), drop_zero_volume=False)
                 if len(df) > cfg.lookback_bars:
                     df = df.iloc[-cfg.lookback_bars :]
                 bars_by_symbol[symbol] = df
@@ -341,7 +376,7 @@ def run_paper_loop(
                 if not len(df):
                     continue
                 last_open = pd.Timestamp(df.index[-1])
-                if last_open + pd.Timedelta(minutes=tf.minutes) > decision_ts:
+                if last_open + pd.Timedelta(minutes=tf.minutes) > bar_open:
                     df = df.iloc[:-1]
                     bars_by_symbol[symbol] = df
 
@@ -384,6 +419,8 @@ def run_paper_loop(
                 holding_bars={s: int(holding_bars[s]) for s in cfg_symbols},
                 extra={
                     "max_position_notional_usd": float(cfg.max_position_notional_usd),
+                    "slippage_bps": float(cfg.slippage_bps),
+                    "taker_fee_bps": float(cfg.taker_fee_bps),
                 },
             )
             decision = strategy.target_exposures(bars_by_symbol, state)

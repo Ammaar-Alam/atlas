@@ -38,14 +38,14 @@ def _infer_bar_minutes(index: pd.DatetimeIndex) -> float:
         diffs_ns = np.diff(index.asi8)
     except Exception:
         diffs = index.to_series().diff().dropna().dt.total_seconds() / 60.0
-        diffs = diffs[(diffs > 0) & (diffs < 60)]  # drop session gaps
+        diffs = diffs[(diffs > 0) & (diffs <= 60)]  # drop session gaps (keep 60m bars)
         if len(diffs) == 0:
             return 1.0
         median = float(diffs.median())
         return median if median > 0 else 1.0
 
     diffs_min = diffs_ns.astype("float64") / (60.0 * 1e9)
-    diffs_min = diffs_min[(diffs_min > 0.0) & (diffs_min < 60.0)]  # drop session gaps
+    diffs_min = diffs_min[(diffs_min > 0.0) & (diffs_min <= 60.0)]  # drop session gaps (keep 60m bars)
     if diffs_min.size == 0:
         return 1.0
     median = float(np.median(diffs_min))
@@ -214,6 +214,8 @@ class OrbTrend(Strategy):
         df: pd.DataFrame,
         decision_ts_ny: pd.Timestamp,
         allow_short: bool,
+        taker_fee_bps: float,
+        slippage_bps: float,
     ) -> tuple[bool, dict[str, Any]]:
         """
         Compute an entry candidate for one symbol at the current decision time.
@@ -327,13 +329,15 @@ class OrbTrend(Strategy):
         )
         edge_bps = float(max(breakout_bps, 0.0) + max(trend_edge_bps, 0.0))
 
-        cost_rt_bps = float(2.0 * float(self.slippage_bps))
+        cost_rt_bps = float(2.0 * (abs(float(slippage_bps)) + abs(float(taker_fee_bps))))
         net_edge_bps = float(edge_bps) - float(self.k_cost) * float(cost_rt_bps)
 
         info["dir"] = int(dir_)
         info["breakout_bps"] = float(breakout_bps)
         info["trend_edge_bps"] = float(trend_edge_bps)
         info["edge_bps"] = float(edge_bps)
+        info["slippage_bps"] = float(slippage_bps)
+        info["taker_fee_bps"] = float(taker_fee_bps)
         info["cost_rt_bps"] = float(cost_rt_bps)
         info["net_edge_bps"] = float(net_edge_bps)
 
@@ -521,6 +525,19 @@ class OrbTrend(Strategy):
                     target_exposures=targets, reason="entry_cutoff", debug=debug
                 )
 
+        taker_fee_bps = 0.0
+        try:
+            if state.extra.get("taker_fee_bps") is not None:
+                taker_fee_bps = float(state.extra.get("taker_fee_bps") or 0.0)
+        except Exception:
+            taker_fee_bps = 0.0
+        slippage_bps = float(self.slippage_bps)
+        try:
+            if state.extra.get("slippage_bps") is not None:
+                slippage_bps = float(state.extra.get("slippage_bps") or 0.0)
+        except Exception:
+            slippage_bps = float(self.slippage_bps)
+
         candidates: list[dict[str, Any]] = []
         for sym in universe:
             ok, info = self._entry_candidate(
@@ -528,6 +545,8 @@ class OrbTrend(Strategy):
                 df=bars_by_symbol.get(sym),
                 decision_ts_ny=decision_ts_ny,
                 allow_short=bool(state.allow_short),
+                taker_fee_bps=float(taker_fee_bps),
+                slippage_bps=float(slippage_bps),
             )
             debug[f"cand_{sym}"] = info
             if ok:

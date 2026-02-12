@@ -1,0 +1,16 @@
+{
+  "orb_trend": {
+    "orb_minutes": 12,
+    "orb_breakout_bps": 20.673,
+    "confirm_bars": 1,
+    "atr_window": 23,
+    "er_window": 15,
+    "er_min": 0.838,
+    "expected_hold_bars": 11,
+    "k_cost": 4.302,
+    "slippage_bps": 1.25,
+    "min_hold_bars": 3,
+    "daily_loss_limit": 0.0194,
+    "kill_switch": 0.0891
+  }
+}

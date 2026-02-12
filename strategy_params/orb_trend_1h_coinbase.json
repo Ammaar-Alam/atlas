@@ -1,0 +1,12 @@
+{
+  "orb_minutes": 240,
+  "orb_breakout_bps": 6.0,
+  "confirm_bars": 1,
+  "atr_window": 24,
+  "er_window": 18,
+  "er_min": 0.25,
+  "expected_hold_bars": 12,
+  "k_cost": 2.0,
+  "slippage_bps": 3.0,
+  "min_hold_bars": 3
+}

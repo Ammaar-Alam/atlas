@@ -1,0 +1,35 @@
+{
+  "crypto_rotation": {
+    "market_symbol": "BTC/USD",
+    "rebalance_interval_bars": 28,
+    "min_trade_notional_usd": 25.0,
+    "rebalance_exposure_threshold": 0.05,
+    "mom_short_bars": 28,
+    "mom_med_bars": 240,
+    "mom_long_bars": 720,
+    "w_mom_short": 0.1,
+    "w_mom_med": 0.3,
+    "w_mom_long": 0.6,
+    "vol_window_bars": 240,
+    "vol_target_bps_per_bar": 40.0,
+    "max_total_exposure": 0.8,
+    "max_exposure_per_symbol": 0.25,
+    "top_k": 4,
+    "score_floor": 0.05,
+    "dv_ewm_span": 60,
+    "min_dollar_volume_ewma": 50000.0,
+    "k_cost": 1.2,
+    "edge_floor_bps": 0.0,
+    "daily_loss_limit": 0.03,
+    "kill_switch": 0.15,
+    "kill_switch_cooldown_days": 7,
+    "market_drawdown_off": 0.18,
+    "market_drawdown_reduce": 0.09,
+    "market_vol_off_bps": 260.0,
+    "market_vol_reduce_bps": 150.0,
+    "market_peak_halflife_bars": 60,
+    "heartbeat_every_bars": 13,
+    "heartbeat_notional_usd": 25.0
+  }
+}
+

@@ -59,19 +59,26 @@ def _daily_eod_equity(equity_curve: pd.DataFrame) -> pd.Series:
     eq.index = idx
     eq = eq.sort_index()
 
-    eq = eq[eq.index.dayofweek < 5]
-    if eq.empty:
-        return pd.Series(dtype=float)
+    has_weekend_bars = bool((eq.index.dayofweek >= 5).any())
+    if not has_weekend_bars:
+        eq = eq[eq.index.dayofweek < 5]
+        if eq.empty:
+            return pd.Series(dtype=float)
 
-    try:
-        session = eq.between_time("09:30", "16:00", include_start=True, include_end=True)
-    except TypeError:
-        session = eq.between_time("09:30", "16:00")
+        try:
+            session = eq.between_time(
+                "09:30", "16:00", include_start=True, include_end=True
+            )
+        except TypeError:
+            session = eq.between_time("09:30", "16:00")
 
-    if session.empty:
-        daily = eq.resample("1D").last()
+        if session.empty:
+            daily = eq.resample("1D").last()
+        else:
+            daily = session.resample("1D").last()
     else:
-        daily = session.resample("1D").last()
+        # 24/7 market (crypto): include weekends and use end-of-day equity snapshots.
+        daily = eq.resample("1D").last()
 
     daily = daily.dropna(subset=["equity"])
     return daily["equity"].astype(float)
@@ -82,7 +89,8 @@ def _daily_sharpe(equity_curve: pd.DataFrame) -> float:
     daily_rets = daily_eq.pct_change().dropna()
     if len(daily_rets) < 2 or float(daily_rets.std()) == 0.0:
         return 0.0
-    return float((daily_rets.mean() / daily_rets.std()) * np.sqrt(252.0))
+    annualization = 365.0 if bool((daily_eq.index.dayofweek >= 5).any()) else 252.0
+    return float((daily_rets.mean() / daily_rets.std()) * np.sqrt(float(annualization)))
 
 
 def compute_metrics(equity_curve: pd.DataFrame, trades: pd.DataFrame) -> BacktestMetrics:

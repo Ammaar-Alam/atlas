@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from dataclasses import field
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -36,8 +37,8 @@ def _env_str(name: str, default: Optional[str] = None) -> Optional[str]:
 
 @dataclass(frozen=True)
 class AlpacaSettings:
-    api_key: str
-    secret_key: str
+    api_key: str = field(repr=False)
+    secret_key: str = field(repr=False)
     paper: bool
     allow_live: bool
     trading_url_override: Optional[str]
@@ -78,8 +79,8 @@ def get_alpaca_settings(*, require_keys: bool) -> AlpacaSettings:
 
 @dataclass(frozen=True)
 class CoinbaseSettings:
-    api_key: str
-    api_secret: str
+    api_key: str = field(repr=False)
+    api_secret: str = field(repr=False)
     passphrase: Optional[str]
 
 
@@ -102,4 +103,3 @@ def get_default_max_position_notional_usd(*, mode: str) -> float:
     if mode == "paper":
         return _env_float("ATLAS_PAPER_MAX_POSITION_NOTIONAL_USD", 1000.0)
     return _env_float("ATLAS_BACKTEST_MAX_POSITION_NOTIONAL_USD", 10000.0)
-

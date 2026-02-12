@@ -1,0 +1,27 @@
+{
+  "basis_carry": {
+    "funding_entry_bps_per_day": -1000.0,
+    "funding_exit_bps_per_day": -1000.0,
+    "edge_horizon_hours": 48.0,
+    "min_basis_bps": 12.0,
+    "min_basis_exit_bps": 3.0,
+    "basis_mean_bps": 0.0,
+    "basis_halflife_hours": 18.0,
+    "basis_momentum_window_bars": 6,
+    "max_basis_widening_bps_per_hour": 300.0,
+    "basis_vol_window_bars": 36,
+    "lambda_basis_vol": 0.10,
+    "edge_saturation_bps": 20.0,
+    "collateral_buffer_frac": 0.10,
+    "z_sigma_daily": 2.0,
+    "spot_vol_window_bars": 120,
+    "max_leverage": 2.8,
+    "max_margin_utilization": 0.60,
+    "maintenance_margin_rate": 0.05,
+    "rebalance_drift_frac": 0.05,
+    "rebalance_min_notional_usd": 40.0,
+    "min_trade_notional_usd": 20.0,
+    "allow_reverse": true,
+    "require_funding_rate": false
+  }
+}

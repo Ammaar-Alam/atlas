@@ -1,0 +1,20 @@
+{
+  "crypto_tsm": {
+    "ema_fast": 23,
+    "ema_slow": 82,
+    "atr_window": 35,
+    "min_atr_bps": 0.0,
+    "momentum_window": 56,
+    "confirm_bars": 2,
+    "exit_confirm_bars": 3,
+    "max_positions": 1,
+    "max_gross_exposure": 1.0,
+    "risk_budget": 0.10,
+    "stop_atr_mult": 2.3995,
+    "trail_atr_mult": 7.819,
+    "cooldown_bars": 6,
+    "rebalance_interval_bars": 6,
+    "edge_floor_bps": 0.0,
+    "k_cost": 1.0
+  }
+}

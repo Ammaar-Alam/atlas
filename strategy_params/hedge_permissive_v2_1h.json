@@ -1,0 +1,25 @@
+{
+  "hedge": {
+    "edge_horizon_hours": 36.0,
+    "funding_ema_alpha": 0.2,
+    "basis_halflife_hours": 16.0,
+    "theta_intercept_bps": 0.0,
+    "theta_funding_beta": 0.0,
+    "include_expected_rebalance_costs": false,
+    "cov_window_bars": 72,
+    "rebalance_delta_max": 0.06,
+    "rebalance_turnover_frac_per_unit_delta": 0.2,
+    "spot_financing_rate_per_hour": 0.0,
+    "z_risk": 0.25,
+    "lambda_risk": 0.8,
+    "z_liq": 1.0,
+    "collateral_buffer_frac": 0.04,
+    "max_leverage": 2.8,
+    "max_margin_utilization": 0.70,
+    "maintenance_margin_rate": 0.05,
+    "min_trade_notional_usd": 20.0,
+    "rebalance_min_notional_usd": 20.0,
+    "flip_hysteresis_bps": 0.25,
+    "require_funding_rate": false
+  }
+}

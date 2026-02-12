@@ -1,0 +1,16 @@
+{
+  "crypto_meta": {
+    "market_symbol": "BTC/USD",
+    "regime_mom_bars": 84,
+    "regime_mom_threshold": 0.0,
+    "regime_er_bars": 42,
+    "regime_er_min": 0.25,
+    "rotation_weight_trending": 1.0,
+    "rotation_weight_ranging": 0.0,
+    "ensemble_params_file": "strategy_params/crypto_ensemble_ultra_micro_6h_alpaca_hb28.json",
+    "rotation_params_file": "strategy_params/crypto_rotation_micro_6h_alpaca.json",
+    "ensemble_symbols": "BTC/USD,ETH/USD",
+    "rotation_symbols": ""
+  }
+}
+

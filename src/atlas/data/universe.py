@@ -81,9 +81,12 @@ def _densify_crypto_bars(bars: pd.DataFrame, *, minutes: int) -> pd.DataFrame:
     if bars.index.tz is None:
         raise ValueError("bars index must be tz-aware")
 
+    # Important: do NOT floor to the target frequency. Some data sources (notably Alpaca crypto)
+    # can timestamp multi-hour bars on an exchange-specific offset (e.g. 6H bars at 01:00/07:00/...).
+    # Flooring to the frequency would shift the grid and can erase all rows on reindex.
     bars = bars.sort_index()
-    start = bars.index.min().floor(f"{int(minutes)}min")
-    end = bars.index.max().floor(f"{int(minutes)}min")
+    start = bars.index.min()
+    end = bars.index.max()
     full_index = pd.date_range(start=start, end=end, freq=f"{int(minutes)}min", tz=bars.index.tz)
 
     out = bars.reindex(full_index)
@@ -127,6 +130,16 @@ def load_universe_bars(
 
     bars_by_symbol: dict[str, pd.DataFrame] = {}
 
+    def _infer_median_bar_minutes(index: pd.DatetimeIndex) -> float:
+        if len(index) < 3:
+            return 0.0
+        diffs = index.to_series().diff().dropna().dt.total_seconds() / 60.0
+        diffs = diffs[diffs > 0]
+        if len(diffs) == 0:
+            return 0.0
+        median = float(diffs.median())
+        return median if median > 0 else 0.0
+
     if data_source == "sample":
         for symbol in symbols:
             bars_by_symbol[symbol] = _load_sample(symbol, assume_tz=assume_tz)
@@ -142,6 +155,17 @@ def load_universe_bars(
             raise ValueError("alpaca_settings is required when data_source=alpaca")
         if start is None or end is None:
             raise ValueError("start/end are required when data_source=alpaca")
+        fetch_tf = timeframe
+        if (
+            mkt == Market.CRYPTO
+            and int(timeframe.minutes) >= 120
+            and int(timeframe.minutes) % 60 == 0
+        ):
+            # Fetch 1H and resample locally for multi-hour crypto windows. Providers can
+            # define higher-timeframe candle boundaries differently (e.g. 6H candles
+            # starting at 00:00 UTC vs 06:00 UTC). Resampling from 1H makes the candle
+            # grid deterministic and comparable across data sources.
+            fetch_tf = BarTimeframe(name="1H", minutes=60)
         for symbol in symbols:
             if mkt == Market.CRYPTO:
                 bars_by_symbol[symbol] = load_crypto_bars_cached(
@@ -149,7 +173,7 @@ def load_universe_bars(
                     symbol=symbol,
                     start=start,
                     end=end,
-                    timeframe=timeframe.name,
+                    timeframe=fetch_tf.name,
                 )
             else:
                 bars_by_symbol[symbol] = load_stock_bars_cached(
@@ -168,23 +192,25 @@ def load_universe_bars(
     elif data_source == "coinbase":
         if start is None or end is None:
             raise ValueError("start/end are required when data_source=coinbase")
-        
+
+        fetch_minutes = int(timeframe.minutes)
+        if fetch_minutes >= 120 and fetch_minutes % 60 == 0:
+            # Same rationale as Alpaca: use 1H candles and resample locally for
+            # deterministic multi-hour candle boundaries.
+            fetch_minutes = 60
+
         # Map timeframe to Coinbase granularity
-        if timeframe.minutes == 1:
+        if fetch_minutes == 1:
             granularity = "ONE_MINUTE"
-        elif timeframe.minutes == 5:
+        elif fetch_minutes == 5:
             granularity = "FIVE_MINUTE"
-        elif timeframe.minutes == 15:
+        elif fetch_minutes == 15:
             granularity = "FIFTEEN_MINUTE"
-        elif timeframe.minutes == 30:
+        elif fetch_minutes == 30:
             # Coinbase does not support native 30-minute candles; fetch 15-minute and resample downstream.
             granularity = "FIFTEEN_MINUTE"
-        elif timeframe.minutes == 60:
+        elif fetch_minutes == 60:
             granularity = "ONE_HOUR"
-        elif timeframe.minutes == 360:
-            granularity = "SIX_HOUR"
-        elif timeframe.minutes == 1440:
-            granularity = "ONE_DAY"
         else:
              # Fallback: fetch 1 minute and let downstream resample
              granularity = "ONE_MINUTE"
@@ -210,12 +236,29 @@ def load_universe_bars(
             bars = bars[bars.index <= end]
         if regular_hours_only:
             bars = filter_regular_hours(bars)
+        if mkt in {Market.CRYPTO, Market.DERIVATIVES}:
+            # Standardize crypto/derivatives bars to UTC to avoid DST artifacts and to
+            # make resampling boundaries comparable across providers.
+            idx = bars.index
+            if idx.tz is None:
+                bars = bars.copy()
+                bars.index = idx.tz_localize("UTC")
+            else:
+                utc_tz = ZoneInfo("UTC")
+                if str(idx.tz) != str(utc_tz):
+                    bars = bars.copy()
+                    bars.index = idx.tz_convert(utc_tz)
         if timeframe.minutes > 1:
-            bars = resample_ohlcv(
-                bars,
-                minutes=timeframe.minutes,
-                drop_zero_volume=(mkt == Market.EQUITY),
-            )
+            # Only resample when the raw data is not already at the requested cadence.
+            # This avoids distorting provider-supplied multi-hour crypto bars that may be
+            # timestamped on an offset relative to local midnight.
+            observed = _infer_median_bar_minutes(bars.index)
+            if observed <= 0.0 or abs(observed - float(timeframe.minutes)) > 1e-6:
+                bars = resample_ohlcv(
+                    bars,
+                    minutes=timeframe.minutes,
+                    drop_zero_volume=(mkt == Market.EQUITY),
+                )
         if mkt in {Market.CRYPTO, Market.DERIVATIVES}:
             bars = _densify_crypto_bars(bars, minutes=timeframe.minutes)
         bars_by_symbol[symbol] = bars

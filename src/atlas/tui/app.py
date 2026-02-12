@@ -27,7 +27,10 @@ from textual.widgets import Header, Input, Log, Static
 
 from atlas.backtest.derivatives_engine import run_derivatives_backtest
 from atlas.backtest.engine import BacktestConfig, BacktestProgress, run_backtest
+from atlas.backtest.plots import write_equity_vs_benchmark_artifacts
+from atlas.backtest.window_analysis import rolling_window_summary
 from atlas.config import get_alpaca_settings, get_default_max_position_notional_usd
+from atlas.data.benchmarks import spy_total_return
 from atlas.data.bars import parse_bar_timeframe
 from atlas.data.universe import load_universe_bars
 from atlas.market import Market, coerce_symbols_for_market, default_symbols, parse_market
@@ -63,6 +66,7 @@ class TuiState:
     initial_cash: float = 100_000.0
     max_position_notional_usd: float = 10_000.0
     slippage_bps: float = 0.0
+    taker_fee_bps: float = 0.0
     allow_short: bool = False
     debug: bool = False
     paper_lookback_bars: int = 200
@@ -150,6 +154,165 @@ STRATEGY_PARAM_SPECS: dict[str, dict[str, type]] = {
         "daily_loss_limit": float,
         "kill_switch": float,
     },
+    "crypto_ensemble": {
+        "market_symbol": str,
+        "ema_fast": int,
+        "ema_slow": int,
+        "atr_window": int,
+        "er_window": int,
+        "breakout_window": int,
+        "momentum_window": int,
+        "er_trend_min": float,
+        "er_range_max": float,
+        "trend_z_min": float,
+        "min_atr_bps": float,
+        "meanrev_ewm_span": int,
+        "meanrev_entry_z": float,
+        "meanrev_exit_z": float,
+        "rsi_window": int,
+        "rsi_oversold": float,
+        "rsi_overbought": float,
+        "require_vwap_alignment_for_trend": bool,
+        "meanrev_disable_cost_rt_bps": float,
+        "meanrev_allow_bear_trend_long_only": bool,
+        "meanrev_setup_max_bars": int,
+        "meanrev_reversal_min_bps": float,
+        "meanrev_size_mult": float,
+        "meanrev_stop_atr_mult": float,
+        "meanrev_trail_atr_mult": float,
+        "meanrev_max_hold_bars": int,
+        "breakout_buffer_bps": float,
+        "confirm_bars": int,
+        "max_positions": int,
+        "max_gross_exposure": float,
+        "max_exposure_per_symbol": float,
+        "risk_budget": float,
+        "stop_atr_mult": float,
+        "trail_atr_mult": float,
+        "take_profit_atr_mult": float,
+        "max_hold_bars": int,
+        "min_hold_bars": int,
+        "cooldown_bars": int,
+        "flip_confirm_bars": int,
+        "min_dollar_volume_ewma": float,
+        "dv_ewm_span": int,
+        "rebalance_exposure_threshold": float,
+        "min_trade_notional_usd": float,
+        "slippage_bps": float,
+        "taker_fee_bps": float,
+        "edge_floor_bps": float,
+        "k_cost": float,
+        "daily_loss_limit": float,
+        "kill_switch": float,
+        "kill_switch_cooldown_days": int,
+        "market_drawdown_off": float,
+        "market_drawdown_reduce": float,
+        "market_vol_off_bps": float,
+        "market_vol_reduce_bps": float,
+        "market_peak_halflife_bars": int,
+        "market_mom_bars": int,
+        "market_mom_off": float,
+        "market_mom_reduce": float,
+        "heartbeat_every_bars": int,
+        "heartbeat_notional_usd": float,
+    },
+    "crypto_tsm": {
+        "market_symbol": str,
+        "ema_fast": int,
+        "ema_slow": int,
+        "atr_window": int,
+        "momentum_window": int,
+        "confirm_bars": int,
+        "exit_confirm_bars": int,
+        "max_positions": int,
+        "max_gross_exposure": float,
+        "max_exposure_per_symbol": float,
+        "risk_budget": float,
+        "stop_atr_mult": float,
+        "trail_atr_mult": float,
+        "take_profit_atr_mult": float,
+        "max_hold_bars": int,
+        "min_hold_bars": int,
+        "cooldown_bars": int,
+        "rebalance_interval_bars": int,
+        "rebalance_exposure_threshold": float,
+        "min_dollar_volume_ewma": float,
+        "dv_ewm_span": int,
+        "min_trade_notional_usd": float,
+        "slippage_bps": float,
+        "taker_fee_bps": float,
+        "edge_floor_bps": float,
+        "k_cost": float,
+        "daily_loss_limit": float,
+        "kill_switch": float,
+        "kill_switch_cooldown_days": int,
+        "market_drawdown_off": float,
+        "market_drawdown_reduce": float,
+        "market_vol_off_bps": float,
+        "market_vol_reduce_bps": float,
+        "market_peak_halflife_bars": int,
+    },
+    "crypto_rotation": {
+        "market_symbol": str,
+        "rebalance_interval_bars": int,
+        "min_trade_notional_usd": float,
+        "rebalance_exposure_threshold": float,
+        "mom_short_bars": int,
+        "mom_med_bars": int,
+        "mom_long_bars": int,
+        "w_mom_short": float,
+        "w_mom_med": float,
+        "w_mom_long": float,
+        "vol_window_bars": int,
+        "vol_target_bps_per_bar": float,
+        "max_total_exposure": float,
+        "max_exposure_per_symbol": float,
+        "top_k": int,
+        "score_floor": float,
+        "dv_ewm_span": int,
+        "min_dollar_volume_ewma": float,
+        "slippage_bps": float,
+        "taker_fee_bps": float,
+        "k_cost": float,
+        "edge_floor_bps": float,
+        "daily_loss_limit": float,
+        "kill_switch": float,
+        "kill_switch_cooldown_days": int,
+        "market_drawdown_off": float,
+        "market_drawdown_reduce": float,
+        "market_vol_off_bps": float,
+        "market_vol_reduce_bps": float,
+        "market_peak_halflife_bars": int,
+        "market_mom_bars": int,
+        "market_mom_off": float,
+        "market_mom_reduce": float,
+        "heartbeat_every_bars": int,
+        "heartbeat_notional_usd": float,
+    },
+    "crypto_momentum": {
+        "market_symbol": str,
+        "momentum_window_bars": int,
+        "max_total_exposure": float,
+        "max_exposure_per_symbol": float,
+        "rebalance_interval_bars": int,
+        "rebalance_exposure_threshold": float,
+        "min_trade_notional_usd": float,
+        "heartbeat_every_bars": int,
+        "heartbeat_notional_usd": float,
+    },
+    "crypto_meta": {
+        "market_symbol": str,
+        "regime_mom_bars": int,
+        "regime_mom_threshold": float,
+        "regime_er_bars": int,
+        "regime_er_min": float,
+        "rotation_weight_trending": float,
+        "rotation_weight_ranging": float,
+        "ensemble_params_file": str,
+        "rotation_params_file": str,
+        "ensemble_symbols": str,
+        "rotation_symbols": str,
+    },
     "perp_flare": {
         "atr_window": int,
         "ema_fast": int,
@@ -230,6 +393,55 @@ STRATEGY_PARAM_SPECS: dict[str, dict[str, type]] = {
         "min_liq_buffer_atr": float,
         "daily_loss_limit": float,
         "kill_switch": float,
+    },
+    "perp_weekly_trend_reset": {
+        "lookback_days": int,
+        "momentum_threshold_bps": float,
+        "ema_fast": int,
+        "ema_slow": int,
+        "require_ema_confirmation": bool,
+        "target_leverage": float,
+        "max_margin_utilization": float,
+        "maintenance_margin_rate": float,
+        "stop_atr_mult": float,
+        "trail_atr_mult": float,
+        "atr_window": int,
+        "min_liq_buffer_atr": float,
+        "use_stops": bool,
+        "rebalance_weekday_utc": int,
+        "rebalance_hour_utc": int,
+        "rebalance_minute_utc": int,
+        "weekly_nudge_exposure": float,
+        "min_trade_notional_usd": float,
+        "heartbeat_exposure": float,
+        "heartbeat_hold_bars": int,
+    },
+    "perp_weekly_profit_chase": {
+        "rebalance_weekday_utc": int,
+        "rebalance_hour_utc": int,
+        "rebalance_minute_utc": int,
+        "weekly_profit_target": float,
+        "weekly_chase_k": float,
+        "atr_window": int,
+        "opening_range_minutes": int,
+        "breakout_buffer_bps": float,
+        "lookback_short_days": float,
+        "lookback_long_days": float,
+        "momentum_threshold_bps": float,
+        "min_atr_bps": float,
+        "sizing_mode": str,
+        "risk_per_trade": float,
+        "base_leverage": float,
+        "max_leverage": float,
+        "max_margin_utilization": float,
+        "maintenance_margin_rate": float,
+        "stop_atr_mult": float,
+        "min_liq_buffer_atr": float,
+        "min_trade_notional_usd": float,
+        "weekly_heartbeat_exposure": float,
+        "weekly_heartbeat_hold_bars": int,
+        "weekly_nudge_exposure": float,
+        "max_flips_per_day": int,
     },
     "basis_carry": {
         "funding_ema_alpha": float,
@@ -337,6 +549,151 @@ STRATEGY_DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
         "min_hold_bars": 3,
         "kill_switch": 0.025,
     },
+    "crypto_ensemble": {
+        "market_symbol": "BTC/USD",
+        "ema_fast": 20,
+        "ema_slow": 80,
+        "atr_window": 20,
+        "er_window": 40,
+        "breakout_window": 60,
+        "momentum_window": 240,
+        "er_trend_min": 0.35,
+        "er_range_max": 0.20,
+        "trend_z_min": 0.20,
+        "min_atr_bps": 6.0,
+        "meanrev_ewm_span": 120,
+        "meanrev_entry_z": 1.75,
+        "meanrev_exit_z": 0.50,
+        "rsi_window": 14,
+        "rsi_oversold": 35.0,
+        "rsi_overbought": 65.0,
+        "require_vwap_alignment_for_trend": True,
+        "meanrev_disable_cost_rt_bps": 30.0,
+        "meanrev_allow_bear_trend_long_only": False,
+        "meanrev_setup_max_bars": 8,
+        "meanrev_reversal_min_bps": 0.0,
+        "meanrev_size_mult": 0.35,
+        "meanrev_stop_atr_mult": 0.0,
+        "meanrev_trail_atr_mult": 0.0,
+        "meanrev_max_hold_bars": 0,
+        "breakout_buffer_bps": 2.0,
+        "confirm_bars": 2,
+        "max_positions": 3,
+        "max_gross_exposure": 1.0,
+        "max_exposure_per_symbol": 1.0,
+        "risk_budget": 0.02,
+        "stop_atr_mult": 2.0,
+        "trail_atr_mult": 3.0,
+        "take_profit_atr_mult": 0.0,
+        "max_hold_bars": 0,
+        "min_hold_bars": 3,
+        "cooldown_bars": 6,
+        "flip_confirm_bars": 3,
+        "min_dollar_volume_ewma": 50_000.0,
+        "dv_ewm_span": 60,
+        "rebalance_exposure_threshold": 0.05,
+        "min_trade_notional_usd": 25.0,
+        "slippage_bps": 3.0,
+        "taker_fee_bps": 25.0,
+        "edge_floor_bps": 4.0,
+        "k_cost": 2.0,
+        "daily_loss_limit": 0.03,
+        "kill_switch": 0.12,
+        "kill_switch_cooldown_days": 7,
+        "market_drawdown_off": 0.15,
+        "market_drawdown_reduce": 0.08,
+        "market_vol_off_bps": 250.0,
+        "market_vol_reduce_bps": 150.0,
+        "market_peak_halflife_bars": 240,
+        "heartbeat_every_bars": 0,
+        "heartbeat_notional_usd": 25.0,
+    },
+    "crypto_tsm": {
+        "market_symbol": "BTC/USD",
+        "ema_fast": 24,
+        "ema_slow": 120,
+        "atr_window": 24,
+        "momentum_window": 240,
+        "confirm_bars": 3,
+        "exit_confirm_bars": 3,
+        "max_positions": 2,
+        "max_gross_exposure": 1.0,
+        "max_exposure_per_symbol": 1.0,
+        "risk_budget": 0.05,
+        "stop_atr_mult": 3.0,
+        "trail_atr_mult": 5.0,
+        "take_profit_atr_mult": 0.0,
+        "max_hold_bars": 0,
+        "min_hold_bars": 6,
+        "cooldown_bars": 12,
+        "rebalance_interval_bars": 4,
+        "rebalance_exposure_threshold": 0.05,
+        "min_dollar_volume_ewma": 100_000.0,
+        "dv_ewm_span": 60,
+        "min_trade_notional_usd": 25.0,
+        "slippage_bps": 3.0,
+        "taker_fee_bps": 25.0,
+        "edge_floor_bps": 8.0,
+        "k_cost": 2.0,
+        "daily_loss_limit": 0.05,
+        "kill_switch": 0.20,
+        "kill_switch_cooldown_days": 7,
+        "market_drawdown_off": 0.20,
+        "market_drawdown_reduce": 0.10,
+        "market_vol_off_bps": 300.0,
+        "market_vol_reduce_bps": 180.0,
+        "market_peak_halflife_bars": 240,
+    },
+    "crypto_rotation": {
+        "market_symbol": "BTC/USD",
+        "rebalance_interval_bars": 28,
+        "min_trade_notional_usd": 25.0,
+        "rebalance_exposure_threshold": 0.02,
+        "mom_short_bars": 28,
+        "mom_med_bars": 120,
+        "mom_long_bars": 360,
+        "w_mom_short": 0.20,
+        "w_mom_med": 0.30,
+        "w_mom_long": 0.50,
+        "vol_window_bars": 120,
+        "vol_target_bps_per_bar": 80.0,
+        "max_total_exposure": 1.0,
+        "max_exposure_per_symbol": 0.60,
+        "top_k": 2,
+        "score_floor": 0.0,
+        "dv_ewm_span": 60,
+        "min_dollar_volume_ewma": 50_000.0,
+        "slippage_bps": 3.0,
+        "taker_fee_bps": 25.0,
+        "k_cost": 1.0,
+        "edge_floor_bps": 0.0,
+        "daily_loss_limit": 0.05,
+        "kill_switch": 0.25,
+        "kill_switch_cooldown_days": 7,
+        "market_drawdown_off": 0.25,
+        "market_drawdown_reduce": 0.12,
+        "market_vol_off_bps": 300.0,
+        "market_vol_reduce_bps": 180.0,
+        "market_peak_halflife_bars": 240,
+        "market_mom_bars": 0,
+        "market_mom_off": 0.0,
+        "market_mom_reduce": 0.0,
+        "heartbeat_every_bars": 0,
+        "heartbeat_notional_usd": 25.0,
+    },
+    "crypto_meta": {
+        "market_symbol": "BTC/USD",
+        "regime_mom_bars": 168,
+        "regime_mom_threshold": 0.0,
+        "regime_er_bars": 84,
+        "regime_er_min": 0.25,
+        "rotation_weight_trending": 1.0,
+        "rotation_weight_ranging": 0.0,
+        "ensemble_params_file": "strategy_params/crypto_ensemble_ultra_6h_coinbase_heartbeat.json",
+        "rotation_params_file": "strategy_params/crypto_rotation_2022_candidate_r2_momfilter_v11_6h_coinbase_nohb.json",
+        "ensemble_symbols": "BTC/USD,ETH/USD",
+        "rotation_symbols": "",
+    },
     "perp_flare": {
         "atr_window": 14,
         "ema_fast": 12,
@@ -417,6 +774,55 @@ STRATEGY_DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
         "min_liq_buffer_atr": 2.5,
         "daily_loss_limit": 0.02,
         "kill_switch": 0.10,
+    },
+    "perp_weekly_trend_reset": {
+        "lookback_days": 14,
+        "momentum_threshold_bps": 0.0,
+        "ema_fast": 12,
+        "ema_slow": 48,
+        "require_ema_confirmation": False,
+        "target_leverage": 2.0,
+        "max_margin_utilization": 0.80,
+        "maintenance_margin_rate": 0.05,
+        "stop_atr_mult": 2.5,
+        "trail_atr_mult": 4.0,
+        "atr_window": 14,
+        "min_liq_buffer_atr": 4.0,
+        "use_stops": False,
+        "rebalance_weekday_utc": 0,
+        "rebalance_hour_utc": 0,
+        "rebalance_minute_utc": 5,
+        "weekly_nudge_exposure": 0.002,
+        "min_trade_notional_usd": 10.0,
+        "heartbeat_exposure": 0.01,
+        "heartbeat_hold_bars": 12,
+    },
+    "perp_weekly_profit_chase": {
+        "rebalance_weekday_utc": 0,
+        "rebalance_hour_utc": 0,
+        "rebalance_minute_utc": 5,
+        "weekly_profit_target": 0.01,
+        "weekly_chase_k": 0.0,
+        "atr_window": 14,
+        "opening_range_minutes": 60,
+        "breakout_buffer_bps": 8.0,
+        "lookback_short_days": 1.0,
+        "lookback_long_days": 7.0,
+        "momentum_threshold_bps": 0.0,
+        "min_atr_bps": 2.0,
+        "sizing_mode": "risk",
+        "risk_per_trade": 0.03,
+        "base_leverage": 10.0,
+        "max_leverage": 25.0,
+        "max_margin_utilization": 0.80,
+        "maintenance_margin_rate": 0.05,
+        "stop_atr_mult": 2.0,
+        "min_liq_buffer_atr": 3.0,
+        "min_trade_notional_usd": 10.0,
+        "weekly_heartbeat_exposure": 0.01,
+        "weekly_heartbeat_hold_bars": 1,
+        "weekly_nudge_exposure": 0.002,
+        "max_flips_per_day": 3,
     },
     "basis_carry": {
         "funding_ema_alpha": 0.20,
@@ -545,6 +951,8 @@ class AtlasTui(App):
         "/notional": "/maxnotional",
         "/max_notional": "/maxnotional",
         "/slip": "/slippage",
+        "/fee": "/takerfee",
+        "/taker_fee": "/takerfee",
         "/allowshort": "/short",
         "/allow_short": "/short",
         "/paperlookbackbars": "/paperlookback",
@@ -562,6 +970,7 @@ class AtlasTui(App):
         "/train": "/tune",
         "/tuning": "/tune",
         "/optimize": "/tune",
+        "/presets": "/preset",
     }
     BASE_COMMANDS = [
         "/help",
@@ -580,12 +989,14 @@ class AtlasTui(App):
         "/strategy",
         "/param",
         "/params",
+        "/preset",
         "/fast",
         "/slow",
         "/cash",
         "/initialcash",
         "/maxnotional",
         "/slippage",
+        "/takerfee",
         "/short",
         "/debug",
         "/data",
@@ -699,6 +1110,286 @@ class AtlasTui(App):
             self._autosave_enabled = False
             self._write_log(f"failed to save config ({path}): {exc}")
 
+    def _strategy_params_dir(self) -> Path:
+        return Path(os.getenv("ATLAS_STRATEGY_PARAMS_DIR", "strategy_params"))
+
+    def _unwrap_params_json(self, raw: object) -> object:
+        if isinstance(raw, dict) and "params" in raw and isinstance(raw["params"], dict):
+            return raw["params"]
+        if isinstance(raw, dict) and "parameters" in raw and isinstance(raw["parameters"], dict):
+            return raw["parameters"]
+        return raw
+
+    def _extract_params_for_strategy(
+        self, raw: object, strategy: str
+    ) -> Optional[dict[str, Any]]:
+        raw = self._unwrap_params_json(raw)
+        if not isinstance(raw, dict):
+            return None
+
+        canonical = strategy.replace("-", "_")
+        if canonical in raw and isinstance(raw[canonical], dict):
+            return dict(raw[canonical])
+        if strategy in raw and isinstance(raw[strategy], dict):
+            return dict(raw[strategy])
+
+        # Heuristic: if the file is a direct param dict and it contains at least one known key.
+        spec = self._strategy_param_spec(strategy)
+        if spec and any(k in spec for k in raw.keys()):
+            return dict(raw)
+
+        return None
+
+    def _extract_preset_profile(self, raw: object) -> Optional[dict[str, Any]]:
+        if not isinstance(raw, dict):
+            return None
+
+        for key in ("atlas_profile", "_atlas_profile", "preset_profile", "profile"):
+            candidate = raw.get(key)
+            if isinstance(candidate, dict):
+                return dict(candidate)
+        return None
+
+    def _profile_bool(self, value: Any, *, key: str) -> Optional[bool]:
+        if isinstance(value, bool):
+            return value
+        parsed = _parse_bool_arg(str(value))
+        if parsed is None:
+            self._write_log(f"preset profile ignored invalid boolean for {key}: {value!r}")
+        return parsed
+
+    def _apply_preset_profile(self, profile: dict[str, Any], *, strategy: str) -> None:
+        changed: list[str] = []
+
+        market_raw = profile.get("market")
+        if isinstance(market_raw, str) and market_raw.strip():
+            try:
+                self._set_market(market_raw)
+                changed.append(f"market={self.state.market}")
+            except Exception:
+                self._write_log(f"preset profile ignored invalid market: {market_raw!r}")
+
+        data_source_raw = profile.get("data_source")
+        if isinstance(data_source_raw, str) and data_source_raw.strip():
+            value = data_source_raw.strip().lower()
+            if value in {"sample", "csv", "alpaca", "coinbase"}:
+                self.state.data_source = value
+                changed.append(f"data_source={value}")
+            else:
+                self._write_log(f"preset profile ignored invalid data_source: {data_source_raw!r}")
+
+        bar_raw = profile.get("bar_timeframe", profile.get("bar"))
+        if bar_raw is not None:
+            value = str(bar_raw).strip()
+            if value:
+                self.state.bar_timeframe = value
+                changed.append(f"bar_timeframe={value}")
+
+        timeframe_raw = profile.get("timeframe")
+        if timeframe_raw is not None:
+            value = str(timeframe_raw).strip()
+            self.state.timeframe = value if value else None
+            changed.append(f"timeframe={self.state.timeframe or 'clear'}")
+
+        start_raw = profile.get("start")
+        if start_raw is not None:
+            value = str(start_raw).strip()
+            self.state.start = value if value else None
+            changed.append("start")
+
+        end_raw = profile.get("end")
+        if end_raw is not None:
+            value = str(end_raw).strip()
+            self.state.end = value if value else None
+            changed.append("end")
+
+        if (
+            self.state.timeframe
+            and self.state.data_source in {"alpaca", "coinbase"}
+            and (start_raw is None and end_raw is None)
+        ):
+            try:
+                delta = _parse_relative_timeframe(self.state.timeframe)
+                end_dt = now_ny()
+                start_dt = end_dt - delta
+                self.state.start = start_dt.isoformat()
+                self.state.end = end_dt.isoformat()
+                changed.append("start/end(from timeframe)")
+            except Exception:
+                self._write_log(
+                    f"preset profile timeframe not parsed: {self.state.timeframe!r} "
+                    "(use a relative spec like 180d, 30d, 6h)"
+                )
+
+        symbols_raw = profile.get("symbols", profile.get("symbol"))
+        if symbols_raw is not None:
+            raw_symbols: list[str] = []
+            if isinstance(symbols_raw, str):
+                chunks = [c.strip() for c in symbols_raw.split(",") if c.strip()]
+                raw_symbols.extend(chunks)
+            elif isinstance(symbols_raw, list):
+                for item in symbols_raw:
+                    if item is None:
+                        continue
+                    text = str(item).strip()
+                    if text:
+                        raw_symbols.append(text)
+            else:
+                text = str(symbols_raw).strip()
+                if text:
+                    raw_symbols.append(text)
+
+            try:
+                mkt = parse_market(self.state.market)
+                coerced = coerce_symbols_for_market(raw_symbols, mkt)
+                if coerced:
+                    self.state.symbols = ",".join(coerced)
+                    changed.append(f"symbols={self.state.symbols}")
+            except Exception:
+                self._write_log(f"preset profile ignored invalid symbols: {symbols_raw!r}")
+
+        cash_raw = profile.get("initial_cash", profile.get("cash"))
+        if cash_raw is not None:
+            try:
+                cash = float(cash_raw)
+                if cash > 0:
+                    self.state.initial_cash = cash
+                    changed.append(f"initial_cash={cash:g}")
+                else:
+                    self._write_log(f"preset profile ignored non-positive initial_cash: {cash_raw!r}")
+            except Exception:
+                self._write_log(f"preset profile ignored invalid initial_cash: {cash_raw!r}")
+
+        max_notional_raw = profile.get(
+            "max_position_notional_usd", profile.get("max_notional_usd", profile.get("maxnotional"))
+        )
+        if max_notional_raw is not None:
+            try:
+                max_notional = float(max_notional_raw)
+                if max_notional > 0:
+                    self.state.max_position_notional_usd = max_notional
+                    changed.append(f"max_position_notional_usd={max_notional:g}")
+                else:
+                    self._write_log(
+                        f"preset profile ignored non-positive max_position_notional_usd: {max_notional_raw!r}"
+                    )
+            except Exception:
+                self._write_log(
+                    f"preset profile ignored invalid max_position_notional_usd: {max_notional_raw!r}"
+                )
+
+        slippage_raw = profile.get("slippage_bps")
+        if slippage_raw is not None:
+            try:
+                slippage = float(slippage_raw)
+                if slippage < 0:
+                    raise ValueError("slippage must be >= 0")
+                self.state.slippage_bps = slippage
+                if "slippage_bps" in self._strategy_param_spec(strategy):
+                    self._ensure_strategy_params(strategy)
+                    self.state.strategy_params[strategy]["slippage_bps"] = float(slippage)
+                changed.append(f"slippage_bps={slippage:g}")
+            except Exception:
+                self._write_log(f"preset profile ignored invalid slippage_bps: {slippage_raw!r}")
+
+        taker_fee_raw = profile.get("taker_fee_bps")
+        if taker_fee_raw is not None:
+            try:
+                fee = float(taker_fee_raw)
+                if fee < 0:
+                    raise ValueError("taker_fee must be >= 0")
+                self.state.taker_fee_bps = fee
+                if "taker_fee_bps" in self._strategy_param_spec(strategy):
+                    self._ensure_strategy_params(strategy)
+                    self.state.strategy_params[strategy]["taker_fee_bps"] = float(fee)
+                changed.append(f"taker_fee_bps={fee:g}")
+            except Exception:
+                self._write_log(f"preset profile ignored invalid taker_fee_bps: {taker_fee_raw!r}")
+
+        allow_short_raw = profile.get("allow_short")
+        if allow_short_raw is not None:
+            value = self._profile_bool(allow_short_raw, key="allow_short")
+            if value is not None:
+                self.state.allow_short = value
+                changed.append(f"allow_short={str(value).lower()}")
+
+        paper_max_notional_raw = profile.get("paper_max_position_notional_usd", profile.get("papermaxnotional"))
+        if paper_max_notional_raw is not None:
+            try:
+                paper_notional = float(paper_max_notional_raw)
+                if paper_notional > 0:
+                    self.state.paper_max_position_notional_usd = paper_notional
+                    changed.append(f"paper_max_position_notional_usd={paper_notional:g}")
+            except Exception:
+                self._write_log(
+                    f"preset profile ignored invalid paper_max_position_notional_usd: {paper_max_notional_raw!r}"
+                )
+
+        paper_poll_raw = profile.get("paper_poll_seconds", profile.get("paperpoll"))
+        if paper_poll_raw is not None:
+            try:
+                paper_poll = int(paper_poll_raw)
+                if paper_poll > 0:
+                    self.state.paper_poll_seconds = paper_poll
+                    changed.append(f"paper_poll_seconds={paper_poll}")
+            except Exception:
+                self._write_log(f"preset profile ignored invalid paper_poll_seconds: {paper_poll_raw!r}")
+
+        paper_lookback_raw = profile.get("paper_lookback_bars", profile.get("paperlookback"))
+        if paper_lookback_raw is not None:
+            try:
+                paper_lookback = int(paper_lookback_raw)
+                if paper_lookback > 0:
+                    self.state.paper_lookback_bars = paper_lookback
+                    changed.append(f"paper_lookback_bars={paper_lookback}")
+            except Exception:
+                self._write_log(f"preset profile ignored invalid paper_lookback_bars: {paper_lookback_raw!r}")
+
+        for bool_key in ("paper_regular_hours_only", "paper_allow_trading_when_closed", "paper_dry_run"):
+            if bool_key not in profile:
+                continue
+            value = self._profile_bool(profile.get(bool_key), key=bool_key)
+            if value is None:
+                continue
+            setattr(self.state, bool_key, value)
+            changed.append(f"{bool_key}={str(value).lower()}")
+
+        self._render_settings()
+        if changed:
+            self._write_log("applied preset profile: " + ", ".join(changed))
+
+    def _detect_strategy_keys_in_params_file(self, raw: object) -> list[str]:
+        raw = self._unwrap_params_json(raw)
+        if not isinstance(raw, dict):
+            return []
+
+        known = set(list_strategy_names())
+        out: set[str] = set()
+        for key, value in raw.items():
+            if not isinstance(key, str) or not isinstance(value, dict):
+                continue
+            canonical = key.strip().replace("-", "_")
+            if canonical in known:
+                out.add(canonical)
+        return sorted(out)
+
+    def _strategy_preset_paths(self, strategy: str) -> list[Path]:
+        preset_dir = self._strategy_params_dir()
+        if not preset_dir.exists() or not preset_dir.is_dir():
+            return []
+
+        paths = sorted(preset_dir.glob("*.json"))
+        out: list[Path] = []
+        for path in paths:
+            try:
+                raw = json.loads(path.read_text())
+            except Exception:
+                continue
+            params = self._extract_params_for_strategy(raw, strategy)
+            if params is not None:
+                out.append(path)
+        return out
+
     def _canonicalize_strategy_name(self, name: str) -> str:
         name = name.strip()
         alias_map = {
@@ -717,6 +1408,13 @@ class AtlasTui(App):
             "hedge-implementation": "hedge",
             "hedge-impl": "hedge",
             "hedge_impl": "hedge",
+            "crypto-ensemble": "crypto_ensemble",
+            "crypto-ens": "crypto_ensemble",
+            "crypto-rotation": "crypto_rotation",
+            "crypto-rot": "crypto_rotation",
+            "crypto-tsm": "crypto_tsm",
+            "crypto-trend": "crypto_tsm",
+            "crypto-meta": "crypto_meta",
         }
         if name in alias_map:
             return alias_map[name]
@@ -739,6 +1437,10 @@ class AtlasTui(App):
             "perp_scalp": "perp-scalp",
             "basis_carry": "basis-carry",
             "hedge": "hedge-implementation",
+            "crypto_ensemble": "crypto-ensemble",
+            "crypto_tsm": "crypto-tsm",
+            "crypto_rotation": "crypto-rotation",
+            "crypto_meta": "crypto-meta",
         }
         alias = alias_map.get(strategy)
         if alias and alias in self.state.strategy_params and strategy not in self.state.strategy_params:
@@ -841,11 +1543,30 @@ class AtlasTui(App):
             return
 
         self.state.market = mkt.value
-        if mkt == Market.CRYPTO:
+        if mkt == Market.EQUITY:
+            self.state.slippage_bps = 0.0
+            self.state.taker_fee_bps = 0.0
+        elif mkt == Market.CRYPTO:
+            self.state.slippage_bps = 3.0
+            self.state.taker_fee_bps = 25.0
+        else:
+            self.state.slippage_bps = 1.25
+            self.state.taker_fee_bps = 3.0
+
+        if mkt == Market.EQUITY:
+            self.state.paper_regular_hours_only = True
+            self.state.paper_allow_trading_when_closed = False
+        else:
             self.state.paper_regular_hours_only = False
             self.state.paper_allow_trading_when_closed = True
 
         strategy = self._canonicalize_strategy_name(self.state.strategy)
+        self._ensure_strategy_params(strategy)
+        spec = self._strategy_param_spec(strategy)
+        if "slippage_bps" in spec:
+            self.state.strategy_params[strategy]["slippage_bps"] = float(self.state.slippage_bps)
+        if "taker_fee_bps" in spec:
+            self.state.strategy_params[strategy]["taker_fee_bps"] = float(self.state.taker_fee_bps)
         current_symbols = [
             s.strip() for s in str(self.state.symbols or "").split(",") if s.strip()
         ]
@@ -853,7 +1574,11 @@ class AtlasTui(App):
             if strategy in {"basis_carry", "hedge"} and mkt in {Market.CRYPTO, Market.DERIVATIVES}:
                 current_symbols = ["BTC/USD", "BTC-PERP"]
             else:
-                default_count = 2 if strategy in {"nec_x", "nec_pdt", "basis_carry", "hedge"} else 1
+                default_count = (
+                    2
+                    if strategy in {"nec_x", "nec_pdt", "basis_carry", "hedge", "crypto_ensemble", "crypto_tsm"}
+                    else 1
+                )
                 current_symbols = default_symbols(mkt, count=default_count)
         else:
             if mkt == Market.EQUITY and any("/" in s for s in current_symbols):
@@ -907,7 +1632,7 @@ class AtlasTui(App):
         if cmd == "/paperlimitbps":
             return ["0", "1", "5", "10", "25"]
         if cmd == "/bar":
-            return ["1Min", "5Min", "15Min", "30Min", "60Min", "4H"]
+            return ["1Min", "5Min", "15Min", "30Min", "60Min", "4H", "6H", "1D"]
         if cmd == "/algorithm":
             return list_strategy_names()
         if cmd == "/tune":
@@ -916,6 +1641,14 @@ class AtlasTui(App):
             strategy = self._canonicalize_strategy_name(self.state.strategy)
             spec = self._strategy_param_spec(strategy)
             return list(spec.keys()) if spec else []
+        if cmd == "/preset":
+            strategy = self._canonicalize_strategy_name(self.state.strategy)
+            names = [p.stem for p in self._strategy_preset_paths(strategy)]
+            out: list[str] = ["list", "load"]
+            for name in names:
+                if name not in out:
+                    out.append(name)
+            return out
         if cmd == "/timeframe":
             return ["6h", "7d", "30d", "180d", "1y", "clear"]
         if cmd == "/csv":
@@ -1124,10 +1857,10 @@ class AtlasTui(App):
         if cmd in {"/help", "/?"}:
             self._write_log(
                 "commands: /stock, /crypto, /backtest, /paper start|stop, /timeframe <7d|6h|1m|1y|clear>, "
-                "/bar <1Min|5Min|30Min|60Min|4H>, /algorithm <name>, /data <sample|csv|alpaca|coinbase>, "
+                "/bar <1Min|5Min|15Min|30Min|60Min|4H|6H|1D>, /algorithm <name>, /data <sample|csv|alpaca|coinbase>, "
                 "/tune start|stop|apply|trials|jobs|seed|train|validate|test|step|drift|margin, "
-                "/param <key> <value>, /params, "
-                "/fast <int>, /slow <int>, /cash <usd> (/initialcash <usd>), /maxnotional <usd>, /slippage <bps>, /short <true|false>, /debug <true|false>, "
+                "/param <key> <value>, /params, /preset list|load <name|path>, "
+                "/fast <int>, /slow <int>, /cash <usd> (/initialcash <usd>), /maxnotional <usd>, /slippage <bps>, /takerfee <bps>, /short <true|false>, /debug <true|false>, "
                 "/feed <iex|delayed_sip|sip>, /paperfeed <iex|delayed_sip|sip>, /csv <path>, "
                 "/paperlookback <bars>, /paperpoll <seconds>, /papermaxnotional <usd>, "
                 "/paperclosed <true|false>, /paperrth <true|false>, /paperlimitbps <float>, /paperdry <true|false>, "
@@ -1290,7 +2023,8 @@ class AtlasTui(App):
                 return
             self.state.slippage_bps = value
             strategy = self._canonicalize_strategy_name(self.state.strategy)
-            if strategy == "orb_trend":
+            spec = self._strategy_param_spec(strategy)
+            if "slippage_bps" in spec:
                 self._ensure_strategy_params(strategy)
                 self.state.strategy_params[strategy]["slippage_bps"] = float(value)
             elif strategy == "nec_x":
@@ -1301,6 +2035,32 @@ class AtlasTui(App):
                 self._write_log(
                     "note: for nec_pdt, slippage is derived from half_spread_bps + slippage_bps + fee_bps (edit via /param to keep gating consistent)"
                 )
+            self._render_settings()
+            return
+
+        if cmd == "/takerfee" and args:
+            try:
+                value = float(args[0])
+            except ValueError:
+                self._write_log("takerfee must be a number (bps)")
+                return
+            if value < 0:
+                self._write_log("takerfee must be >= 0")
+                return
+            self.state.taker_fee_bps = value
+
+            # Keep strategy-side admission logic aligned when the strategy exposes the param.
+            strategy = self._canonicalize_strategy_name(self.state.strategy)
+            spec = self._strategy_param_spec(strategy)
+            if "taker_fee_bps" in spec:
+                self._ensure_strategy_params(strategy)
+                self.state.strategy_params[strategy]["taker_fee_bps"] = float(value)
+            elif strategy == "nec_pdt":
+                self._write_log(
+                    "note: nec_pdt models fees via its fee_bps param (edit via /param fee_bps ...); "
+                    "this takerfee setting affects the backtest engine only"
+                )
+
             self._render_settings()
             return
 
@@ -1641,6 +2401,98 @@ class AtlasTui(App):
             self._render_settings()
             return
 
+        if cmd == "/preset":
+            if not args or args[0].lower() == "list":
+                strategy = self._canonicalize_strategy_name(self.state.strategy)
+                presets = self._strategy_preset_paths(strategy)
+                if not presets:
+                    self._write_log(
+                        f"no presets found for {strategy} (expected json under {self._strategy_params_dir()})"
+                    )
+                    return
+                names = ", ".join([p.stem for p in presets])
+                self._write_log(f"presets for {strategy}: {names}")
+                return
+
+            action = args[0].lower()
+            query = " ".join(args[1:]) if action == "load" else " ".join(args)
+            query = query.strip()
+            if not query:
+                self._write_log("preset usage: /preset list | /preset load <name|path> | /preset <name>")
+                return
+
+            strategy = self._canonicalize_strategy_name(self.state.strategy)
+            preset_dir = self._strategy_params_dir()
+
+            selected: Optional[Path] = None
+            raw_query_path = Path(query)
+            if raw_query_path.exists():
+                selected = raw_query_path
+            else:
+                rel = preset_dir / query
+                if rel.exists():
+                    selected = rel
+                elif not query.lower().endswith(".json"):
+                    rel_json = preset_dir / f"{query}.json"
+                    if rel_json.exists():
+                        selected = rel_json
+
+            if selected is None:
+                needle = query.lower()
+                candidates = self._strategy_preset_paths(strategy)
+                matches = [p for p in candidates if needle in p.stem.lower()]
+                if len(matches) == 1:
+                    selected = matches[0]
+                elif not matches:
+                    self._write_log(f"no matching presets for {strategy}: {query}")
+                    return
+                else:
+                    names = ", ".join([p.stem for p in matches[:12]])
+                    suffix = "" if len(matches) <= 12 else f" (+{len(matches) - 12} more)"
+                    self._write_log(f"multiple presets match {query!r}: {names}{suffix}")
+                    return
+
+            try:
+                raw = json.loads(selected.read_text())
+            except Exception as exc:
+                self._write_log(f"failed to read preset {selected}: {exc}")
+                return
+
+            params = self._extract_params_for_strategy(raw, strategy)
+            if params is None:
+                keys = self._detect_strategy_keys_in_params_file(raw)
+                if len(keys) == 1:
+                    strategy = keys[0]
+                    self.state.strategy = strategy
+                    self._ensure_strategy_params(strategy)
+                    params = self._extract_params_for_strategy(raw, strategy)
+
+            if params is None:
+                self._write_log(
+                    f"preset {selected} does not include params for {self._canonicalize_strategy_name(self.state.strategy)}"
+                )
+                return
+
+            self.state.strategy_params[strategy] = dict(params)
+            profile = self._extract_preset_profile(raw)
+
+            # If a crypto preset is loaded, switch market to crypto for convenience.
+            if strategy in {
+                "crypto_tsm",
+                "crypto_ensemble",
+                "crypto_rotation",
+                "crypto_momentum",
+                "crypto_meta",
+            }:
+                self._set_market("crypto")
+            else:
+                self._render_settings()
+
+            if profile is not None:
+                self._apply_preset_profile(profile, strategy=strategy)
+            self._write_log(f"loaded preset for {strategy}: {selected}")
+            return
+
         if cmd == "/backtest":
             self._run_backtest()
             return
@@ -1734,6 +2586,7 @@ class AtlasTui(App):
         if params:
             table.add_row("params", self._format_strategy_params(self.state.strategy, params))
         table.add_row("slippage_bps", f"{self.state.slippage_bps:.2f}")
+        table.add_row("taker_fee_bps", f"{self.state.taker_fee_bps:.2f}")
         table.add_row(
             "allow_short",
             Text("true", style="green") if self.state.allow_short else Text("false", style="red"),
@@ -2967,6 +3820,7 @@ class AtlasTui(App):
                     initial_cash=float(snapshot.get("initial_cash", 100_000.0)),
                     max_position_notional_usd=float(snapshot.get("max_position_notional_usd", 10_000.0)),
                     slippage_bps=float(snapshot.get("slippage_bps", 0.0)),
+                    taker_fee_bps=float(snapshot.get("taker_fee_bps", 0.0)),
                     allow_short=bool(snapshot.get("allow_short", False)),
                 )
                 tune_cfg = TuneConfig(
@@ -3198,6 +4052,7 @@ class AtlasTui(App):
                     initial_cash=float(snapshot.get("initial_cash", 100_000.0)),
                     max_position_notional_usd=float(snapshot.get("max_position_notional_usd", 10_000.0)),
                     slippage_bps=float(snapshot.get("slippage_bps", 0.0)),
+                    taker_fee_bps=float(snapshot.get("taker_fee_bps", 0.0)),
                     allow_short=bool(snapshot.get("allow_short", False)),
                 )
 
@@ -3385,6 +4240,7 @@ class AtlasTui(App):
             initial_cash=self.state.initial_cash,
             max_position_notional_usd=self.state.max_position_notional_usd,
             slippage_bps=self.state.slippage_bps,
+            taker_fee_bps=self.state.taker_fee_bps,
             allow_short=self.state.allow_short,
         )
 
@@ -3446,6 +4302,7 @@ class AtlasTui(App):
                     f"initial_cash={cfg.initial_cash:.2f}",
                     f"max_notional={cfg.max_position_notional_usd:.2f}",
                     f"slippage_bps={cfg.slippage_bps:.2f}",
+                    f"taker_fee_bps={cfg.taker_fee_bps:.2f}",
                     f"allow_short={cfg.allow_short}",
                 ]
             ),
@@ -3464,6 +4321,45 @@ class AtlasTui(App):
                 ]
             ),
         )
+
+        try:
+            start_ts = pd.Timestamp(common_index[0]).to_pydatetime()
+            end_ts = pd.Timestamp(common_index[-1]).to_pydatetime()
+            spy = spy_total_return(start=start_ts, end=end_ts)
+            if spy is not None:
+                (run_dir / "benchmark.json").write_text(json.dumps({"spy": spy.to_dict()}, indent=2))
+                summary.add_row(
+                    "benchmark",
+                    f"SPY {float(spy.total_return):.4%} ({spy.start_observed} → {spy.end_observed})",
+                )
+                alpha = float(metrics.get("total_return", 0.0) or 0.0) - float(spy.total_return)
+                summary.add_row("vs_spy", f"alpha={alpha:.4%}  beat_spy={alpha > 0.0}")
+        except Exception:
+            # Benchmark is optional (network/data fetch can fail); omit if unavailable.
+            pass
+
+        try:
+            csv_path, png_path = write_equity_vs_benchmark_artifacts(
+                run_dir=run_dir,
+                benchmark="spy.us",
+            )
+            if csv_path is not None:
+                summary.add_row("plot_csv", str(csv_path))
+            if png_path is not None:
+                summary.add_row("plot_png", str(png_path))
+        except Exception:
+            # Plotting is optional (matplotlib/network can fail); omit if unavailable.
+            pass
+
+        try:
+            weekly, _rows = rolling_window_summary(
+                run_dir=run_dir, window=timedelta(days=7), step=timedelta(days=7), benchmark="spy.us"
+            )
+            summary.add_row("weekly_mean_return", f"{float(weekly.mean_return):.4%}")
+            summary.add_row("weekly_trade_window_frac", f"{float(weekly.trade_window_frac):.2%}")
+        except Exception:
+            # Window analysis is optional (depends on equity/trades files + benchmark data).
+            pass
 
         return run_dir, summary
 
@@ -3516,6 +4412,8 @@ class AtlasTui(App):
             lookback_bars=self.state.paper_lookback_bars,
             poll_seconds=self.state.paper_poll_seconds,
             max_position_notional_usd=self.state.paper_max_position_notional_usd,
+            slippage_bps=float(self.state.slippage_bps),
+            taker_fee_bps=float(self.state.taker_fee_bps),
             allow_short=self.state.allow_short,
             regular_hours_only=self.state.paper_regular_hours_only,
             allow_trading_when_closed=self.state.paper_allow_trading_when_closed,

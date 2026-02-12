@@ -1,0 +1,18 @@
+{
+  "perp_flare": {
+    "atr_window": 21,
+    "ema_fast": 13,
+    "ema_slow": 24,
+    "er_window": 20,
+    "breakout_window": 21,
+    "er_min": 0.27,
+    "edge_floor_bps": 22.886,
+    "k_cost": 4.095562500000001,
+    "risk_per_trade": 0.01181,
+    "stop_atr_mult": 5.024,
+    "trail_atr_mult": 5.4615,
+    "max_margin_utilization": 0.61065,
+    "max_leverage": 16.5342,
+    "min_liq_buffer_atr": 3.9935
+  }
+}

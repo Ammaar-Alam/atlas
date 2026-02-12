@@ -1,0 +1,32 @@
+{
+  "crypto_ensemble": {
+    "ema_fast": 21,
+    "ema_slow": 63,
+    "atr_window": 17,
+    "er_window": 10,
+    "breakout_window": 33,
+    "momentum_window": 46,
+    "er_trend_min": 0.55,
+    "er_range_max": 0.3045,
+    "trend_z_min": 0.2475,
+    "min_atr_bps": 10.0,
+    "meanrev_ewm_span": 67,
+    "meanrev_entry_z": 1.723,
+    "breakout_buffer_bps": 4.3695,
+    "max_positions": 2,
+    "max_gross_exposure": 1.0,
+    "risk_budget": 0.2,
+    "stop_atr_mult": 1.57,
+    "trail_atr_mult": 8.976,
+    "cooldown_bars": 9,
+    "flip_confirm_bars": 5,
+    "k_cost": 1.4,
+    "edge_floor_bps": 20.0,
+    "market_drawdown_off": 0.5,
+    "market_drawdown_reduce": 0.25,
+    "market_vol_off_bps": 600.0,
+    "market_vol_reduce_bps": 300.0,
+    "kill_switch": 0.5,
+    "daily_loss_limit": 0.2
+  }
+}

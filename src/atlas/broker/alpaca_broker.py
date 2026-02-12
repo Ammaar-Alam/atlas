@@ -5,10 +5,6 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
-from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
-
 from atlas.config import AlpacaSettings
 from atlas.market import Market, parse_market
 
@@ -26,7 +22,14 @@ class OrderFill:
     filled_avg_price: Optional[float]
 
 
-def trading_client(settings: AlpacaSettings) -> TradingClient:
+def trading_client(settings: AlpacaSettings):
+    try:
+        from alpaca.trading.client import TradingClient
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Alpaca trading requires the optional 'alpaca-py' dependency. "
+            "Install it (e.g. `pip install alpaca-py`) to use paper/live trading."
+        ) from exc
     return TradingClient(
         api_key=settings.api_key,
         secret_key=settings.secret_key,
@@ -52,6 +55,14 @@ def submit_market_order(
     side: str,
     market: str = "equity",
 ) -> str:
+    try:
+        from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
+        from alpaca.trading.requests import MarketOrderRequest
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Alpaca trading requires the optional 'alpaca-py' dependency. "
+            "Install it (e.g. `pip install alpaca-py`) to use paper/live trading."
+        ) from exc
     if qty <= 0:
         raise ValueError("qty must be > 0")
 
@@ -78,6 +89,14 @@ def submit_limit_order(
     extended_hours: bool,
     market: str = "equity",
 ) -> str:
+    try:
+        from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
+        from alpaca.trading.requests import LimitOrderRequest
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Alpaca trading requires the optional 'alpaca-py' dependency. "
+            "Install it (e.g. `pip install alpaca-py`) to use paper/live trading."
+        ) from exc
     if qty <= 0:
         raise ValueError("qty must be > 0")
     if limit_price <= 0:

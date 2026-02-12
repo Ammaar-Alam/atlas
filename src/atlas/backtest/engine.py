@@ -5,6 +5,7 @@ import logging
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -24,7 +25,7 @@ class BacktestConfig:
     max_position_notional_usd: float
     slippage_bps: float
     allow_short: bool
-    taker_fee_bps: float = 3.0
+    taker_fee_bps: float = 0.0
     maintenance_margin_rate: float = 0.05
     liquidation_fee_rate: float = 0.01
 
@@ -57,6 +58,26 @@ class BacktestProgress:
     last_trade: Optional[dict[str, Any]] = None
 
 
+def _to_utc_timestamp(value: object) -> pd.Timestamp:
+    ts = pd.Timestamp(value)
+    if ts.tz is None:
+        return ts.tz_localize("UTC")
+    return ts.tz_convert("UTC")
+
+
+def _in_score_window(
+    ts_utc: pd.Timestamp,
+    *,
+    score_start_utc: Optional[pd.Timestamp],
+    score_end_utc: Optional[pd.Timestamp],
+) -> bool:
+    if score_start_utc is not None and ts_utc < score_start_utc:
+        return False
+    if score_end_utc is not None and ts_utc >= score_end_utc:
+        return False
+    return True
+
+
 def run_backtest(
     *,
     bars_by_symbol: dict[str, pd.DataFrame],
@@ -67,6 +88,9 @@ def run_backtest(
     progress_interval_s: float = 0.25,
     debug: bool = False,
     output_mode: str = "full",
+    score_start: Optional[datetime] = None,
+    score_end: Optional[datetime] = None,
+    no_trade_before: Optional[datetime] = None,
 ) -> BacktestOutputs:
     mode = (output_mode or "full").strip().lower()
     if mode not in {"full", "minimal"}:
@@ -101,6 +125,10 @@ def run_backtest(
     if len(common_index) < 3:
         raise ValueError("need at least 3 aligned bars to run a backtest")
 
+    score_start_utc = _to_utc_timestamp(score_start) if score_start is not None else None
+    score_end_utc = _to_utc_timestamp(score_end) if score_end is not None else None
+    no_trade_before_utc = _to_utc_timestamp(no_trade_before) if no_trade_before is not None else None
+
     bars_by_symbol = {
         s: bars_by_symbol[s].loc[common_index].copy() for s in symbols
     }
@@ -113,10 +141,18 @@ def run_backtest(
     current_targets: dict[str, float] = {s: 0.0 for s in symbols}
     pending_target_exposures: Optional[dict[str, float]] = None
     pending_reason: Optional[str] = None
+    pending_execution_hints: Optional[dict[str, dict[str, Any]]] = None
     pending_decision_context: Optional[dict[str, Any]] = None
 
     max_notional = float(cfg.max_position_notional_usd)
     slippage = float(cfg.slippage_bps) / 10_000.0
+    taker_fee = float(cfg.taker_fee_bps) / 10_000.0
+    # Guard against floating point dust causing unrealistic micro-fills.
+    eps_cash = 1e-9
+    eps_qty = 1e-12
+    # Approximate venue minimums: crypto spot orders often have a ~$1 notional minimum.
+    is_crypto_market = any("/" in s for s in symbols)
+    min_trade_notional_usd = 1.0 if is_crypto_market else 0.0
 
     trades_rows: list[dict] = []
     equity_rows: list[dict] = []
@@ -150,6 +186,7 @@ def run_backtest(
 
         for i in range(len(idx)):
             ts = pd.Timestamp(idx[i])
+            ts_utc = _to_utc_timestamp(ts)
             opens = {s: float(open_by_symbol[s][i]) for s in symbols}
             closes = {s: float(close_by_symbol[s][i]) for s in symbols}
 
@@ -164,87 +201,132 @@ def run_backtest(
                 )
 
             if i > 0 and pending_target_exposures is not None:
-                targets: dict[str, float] = {
-                    s: float(pending_target_exposures.get(s, 0.0)) for s in symbols
-                }
-                if not cfg.allow_short:
-                    targets = {s: max(0.0, v) for s, v in targets.items()}
-
-                orders: list[tuple[str, float, float]] = []
-                for s in symbols:
-                    open_px = opens[s]
-                    target_notional = targets[s] * max_notional
-                    target_qty = target_notional / open_px if open_px > 0 else 0.0
-                    delta_qty = target_qty - position_qty[s]
-                    if abs(delta_qty) > 1e-8:
-                        orders.append((s, delta_qty, target_qty))
-                    else:
-                        current_targets[s] = float(targets[s])
-
-                sells = [o for o in orders if o[1] < 0]
-                buys = [o for o in orders if o[1] > 0]
-
-                def _exec(symbol: str, delta_qty: float, target_qty: float) -> None:
-                    nonlocal cash
-                    open_px = opens[symbol]
-                    side = "BUY" if delta_qty > 0 else "SELL"
-                    fill_px = (
-                        open_px * (1.0 + slippage)
-                        if delta_qty > 0
-                        else open_px * (1.0 - slippage)
-                    )
-
-                    if delta_qty > 0:
-                        max_affordable = cash / fill_px if fill_px > 0 else 0.0
-                        if delta_qty > max_affordable:
-                            delta_qty = max_affordable
-                            target_qty = position_qty[symbol] + delta_qty
-
-                    cash -= delta_qty * fill_px
-                    position_qty[symbol] = target_qty
-                    current_targets[symbol] = (
-                        (position_qty[symbol] * open_px) / max_notional
-                        if max_notional > 0
-                        else 0.0
-                    )
-
-                    trade_row = {
-                        "timestamp": ts.isoformat(),
-                        "symbol": symbol,
-                        "side": side,
-                        "qty": float(abs(delta_qty)),
-                        "fill_price": float(fill_px),
-                        "notional": float(abs(delta_qty) * fill_px),
-                        "cash_after": float(cash),
-                        "position_qty_after": float(position_qty[symbol]),
-                        "strategy_reason": pending_reason,
+                if no_trade_before_utc is not None and ts_utc <= no_trade_before_utc:
+                    pending_target_exposures = None
+                    pending_reason = None
+                    pending_execution_hints = None
+                    pending_decision_context = None
+                else:
+                    targets: dict[str, float] = {
+                        s: float(pending_target_exposures.get(s, 0.0)) for s in symbols
                     }
-                    trades_rows.append(trade_row)
+                    if not cfg.allow_short:
+                        targets = {s: max(0.0, v) for s, v in targets.items()}
 
-                    if f_trade_debug is not None:
-                        f_trade_debug.write(
-                            json.dumps(
-                                {
-                                    "timestamp": ts.isoformat(),
-                                    "trade": trade_row,
-                                    "decision": pending_decision_context,
-                                    "execution": {
-                                        "timestamp": ts.isoformat(),
-                                        "bars": execution_bars,
-                                    },
-                                }
-                            )
-                            + "\n"
+                    orders: list[tuple[str, float, float]] = []
+                    for s in symbols:
+                        open_px = opens[s]
+                        target_notional = targets[s] * max_notional
+                        target_qty = target_notional / open_px if open_px > 0 else 0.0
+                        delta_qty = target_qty - position_qty[s]
+                        if abs(delta_qty) > 1e-8:
+                            orders.append((s, delta_qty, target_qty))
+                        else:
+                            current_targets[s] = float(targets[s])
+
+                    sells = [o for o in orders if o[1] < 0]
+                    buys = [o for o in orders if o[1] > 0]
+
+                    def _exec(symbol: str, delta_qty: float, target_qty: float) -> None:
+                        nonlocal cash
+                        open_px = opens[symbol]
+                        hint = (pending_execution_hints or {}).get(symbol)
+                        if isinstance(hint, dict):
+                            mode = str(hint.get("mode", "") or "").strip().lower()
+                            try:
+                                price = float(hint.get("price", 0.0) or 0.0)
+                            except Exception:
+                                price = 0.0
+                            if price > 0.0 and price == price:
+                                if mode == "min":
+                                    open_px = min(open_px, price)
+                                elif mode == "max":
+                                    open_px = max(open_px, price)
+                        side = "BUY" if delta_qty > 0 else "SELL"
+                        fill_px = (
+                            open_px * (1.0 + slippage)
+                            if delta_qty > 0
+                            else open_px * (1.0 - slippage)
                         )
 
-                for s, delta, tgt in sells:
-                    _exec(s, delta, tgt)
-                for s, delta, tgt in buys:
-                    _exec(s, delta, tgt)
+                        if delta_qty > 0:
+                            denom = fill_px * (1.0 + taker_fee) if fill_px > 0 else 0.0
+                            max_affordable = cash / denom if denom > 0 else 0.0
+                            if delta_qty > max_affordable:
+                                delta_qty = max_affordable
+                                target_qty = position_qty[symbol] + delta_qty
+                            # If we can't meaningfully increase exposure (e.g. after paying fees),
+                            # treat the target as satisfied to avoid repeated "dust" rebalancing.
+                            notional_after_clamp = float(abs(delta_qty) * fill_px)
+                            if notional_after_clamp < float(min_trade_notional_usd) or abs(delta_qty) <= eps_qty:
+                                current_targets[symbol] = float(targets.get(symbol, 0.0))
+                                if abs(cash) <= eps_cash:
+                                    cash = 0.0
+                                return
 
-                pending_target_exposures = None
-                pending_reason = None
-                pending_decision_context = None
+                        notional = float(abs(delta_qty) * fill_px)
+                        fee_paid = float(notional * taker_fee)
+
+                        cash -= delta_qty * fill_px
+                        cash -= fee_paid
+                        if abs(cash) <= eps_cash:
+                            cash = 0.0
+                        position_qty[symbol] = target_qty
+                        current_targets[symbol] = (
+                            (position_qty[symbol] * open_px) / max_notional
+                            if max_notional > 0
+                            else 0.0
+                        )
+
+                        trade_row = {
+                            "timestamp": ts.isoformat(),
+                            "symbol": symbol,
+                            "side": side,
+                            "qty": float(abs(delta_qty)),
+                            "fill_price": float(fill_px),
+                            "notional": float(abs(delta_qty) * fill_px),
+                            "fee_paid": float(fee_paid),
+                            "cash_after": float(cash),
+                            "position_qty_after": float(position_qty[symbol]),
+                            "strategy_reason": pending_reason,
+                        }
+                        if _in_score_window(
+                            ts_utc,
+                            score_start_utc=score_start_utc,
+                            score_end_utc=score_end_utc,
+                        ):
+                            trades_rows.append(trade_row)
+
+                        if f_trade_debug is not None:
+                            if _in_score_window(
+                                ts_utc,
+                                score_start_utc=score_start_utc,
+                                score_end_utc=score_end_utc,
+                            ):
+                                f_trade_debug.write(
+                                    json.dumps(
+                                        {
+                                            "timestamp": ts.isoformat(),
+                                            "trade": trade_row,
+                                            "decision": pending_decision_context,
+                                            "execution": {
+                                                "timestamp": ts.isoformat(),
+                                                "bars": execution_bars,
+                                            },
+                                        }
+                                    )
+                                    + "\n"
+                                )
+
+                    for s, delta, tgt in sells:
+                        _exec(s, delta, tgt)
+                    for s, delta, tgt in buys:
+                        _exec(s, delta, tgt)
+
+                    pending_target_exposures = None
+                    pending_reason = None
+                    pending_execution_hints = None
+                    pending_decision_context = None
 
             equity = cash + sum(position_qty[s] * closes[s] for s in symbols)
             day_pnl = float(equity - day_start_equity)
@@ -270,7 +352,8 @@ def run_backtest(
                 row[f"{s}_close"] = float(closes[s])
                 row[f"{s}_position_qty"] = float(position_qty[s])
                 row[f"{s}_holding_bars"] = int(holding_bars[s])
-            equity_rows.append(row)
+            if _in_score_window(ts_utc, score_start_utc=score_start_utc, score_end_utc=score_end_utc):
+                equity_rows.append(row)
 
             if progress is not None:
                 now = time.monotonic()
@@ -328,6 +411,10 @@ def run_backtest(
             if not cfg.allow_short:
                 next_targets = {s: max(0.0, v) for s, v in next_targets.items()}
 
+            decision_ts_utc = _to_utc_timestamp(state.timestamp)
+            if no_trade_before_utc is not None and decision_ts_utc <= no_trade_before_utc:
+                next_targets = {s: 0.0 for s in symbols}
+
             decision_row = None
             if write_decisions or debug:
                 decision_row = {
@@ -358,20 +445,28 @@ def run_backtest(
                             },
                         },
                     }
-                if f_decisions is not None:
+                if f_decisions is not None and _in_score_window(
+                    decision_ts_utc,
+                    score_start_utc=score_start_utc,
+                    score_end_utc=score_end_utc,
+                ):
                     f_decisions.write(json.dumps(decision_row) + "\n")
 
             if any(abs(next_targets[s] - current_targets.get(s, 0.0)) > 1e-8 for s in symbols):
                 pending_target_exposures = next_targets
                 pending_reason = decision.reason
-                if debug:
-                    pending_decision_context = {
-                        "timestamp": (decision_row or {}).get("timestamp"),
-                        "reason": decision.reason,
-                        "targets": next_targets,
-                        "debug": decision.debug,
-                        "snapshot": (decision_row or {}).get("snapshot"),
-                    }
+                pending_execution_hints = (
+                    dict(decision.execution_hints) if isinstance(decision.execution_hints, dict) else None
+                )
+            if debug:
+                pending_decision_context = {
+                    "timestamp": (decision_row or {}).get("timestamp"),
+                    "reason": decision.reason,
+                    "targets": next_targets,
+                    "debug": decision.debug,
+                    "execution_hints": decision.execution_hints,
+                    "snapshot": (decision_row or {}).get("snapshot"),
+                }
 
     trade_cols = [
         "timestamp",
@@ -380,12 +475,15 @@ def run_backtest(
         "qty",
         "fill_price",
         "notional",
+        "fee_paid",
         "cash_after",
         "position_qty_after",
         "strategy_reason",
     ]
     trades = pd.DataFrame(trades_rows, columns=trade_cols)
     equity_curve = pd.DataFrame(equity_rows)
+    if equity_curve.empty:
+        raise ValueError("no equity rows recorded (check score_start/score_end)")
     ts = pd.to_datetime(equity_curve["timestamp"], errors="raise", utc=True).dt.tz_convert(NY_TZ)
     equity_curve = equity_curve.drop(columns=["timestamp"])
     equity_curve.index = ts
@@ -405,8 +503,10 @@ def run_backtest(
         metrics = compute_metrics(equity_curve, trades)
         metrics_json.write_text(json.dumps(metrics.to_dict(), indent=2))
 
-    logger.info("backtest done: final equity %.2f", float(equity_curve['equity'].iloc[-1]))
-    logger.info("outputs: %s", run_dir)
+    # Keep the engine quiet by default (important for tuning runs that invoke thousands of
+    # backtests). The CLI/TUI already prints a human summary.
+    logger.debug("backtest done: final equity %.2f", float(equity_curve["equity"].iloc[-1]))
+    logger.debug("outputs: %s", run_dir)
 
     return BacktestOutputs(
         run_dir=run_dir,

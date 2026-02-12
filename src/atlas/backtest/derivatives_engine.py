@@ -5,6 +5,7 @@ import logging
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -12,7 +13,13 @@ import pandas as pd
 import numpy as np
 
 from atlas.backtest.metrics import compute_metrics
-from atlas.backtest.engine import BacktestConfig, BacktestOutputs, BacktestProgress
+from atlas.backtest.engine import (
+    BacktestConfig,
+    BacktestOutputs,
+    BacktestProgress,
+    _in_score_window,
+    _to_utc_timestamp,
+)
 from atlas.strategies.base import Strategy, StrategyState
 from atlas.utils.time import NY_TZ
 from atlas.logging_utils import get_logger
@@ -34,6 +41,9 @@ def run_derivatives_backtest(
     progress_interval_s: float = 0.25,
     debug: bool = False,
     output_mode: str = "full",
+    score_start: Optional[datetime] = None,
+    score_end: Optional[datetime] = None,
+    no_trade_before: Optional[datetime] = None,
 ) -> BacktestOutputs:
     """
     Derivatives-specific backtest engine.
@@ -122,6 +132,10 @@ def run_derivatives_backtest(
     prev_equity = float(cfg.initial_cash)
     last_progress_t = 0.0
 
+    score_start_utc = _to_utc_timestamp(score_start) if score_start is not None else None
+    score_end_utc = _to_utc_timestamp(score_end) if score_end is not None else None
+    no_trade_before_utc = _to_utc_timestamp(no_trade_before) if no_trade_before is not None else None
+
     # Liquidation Params
     MAINTENANCE_MARGIN = float(cfg.maintenance_margin_rate)
     LIQ_FEE = float(cfg.liquidation_fee_rate)
@@ -146,6 +160,7 @@ def run_derivatives_backtest(
 
         for i in range(len(idx)):
             ts = pd.Timestamp(idx[i])
+            ts_utc = _to_utc_timestamp(ts)
             opens = {s: float(open_by_symbol[s][i]) for s in symbols}
             closes = {s: float(close_by_symbol[s][i]) for s in symbols}
             execution_bars = (
@@ -249,7 +264,7 @@ def run_derivatives_backtest(
                     bar_fees_paid += float(taker_fee)
                     bar_liquidation_fee += float(liq_fee)
 
-                    trades_rows.append({
+                    liq_trade = {
                         "timestamp": ts.isoformat(),
                         "symbol": s,
                         "side": "SELL" if qty > 0 else "BUY",
@@ -264,23 +279,30 @@ def run_derivatives_backtest(
                         "position_qty_after": 0.0,
                         "strategy_reason": "LIQUIDATION",
                         "liquidation": 1,
-                    })
+                    }
+                    if _in_score_window(
+                        ts_utc, score_start_utc=score_start_utc, score_end_utc=score_end_utc
+                    ):
+                        trades_rows.append(liq_trade)
 
                     if f_trade_debug is not None:
-                        f_trade_debug.write(
-                            json.dumps(
-                                {
-                                    "timestamp": ts.isoformat(),
-                                    "event": "liquidation",
-                                    "trade": trades_rows[-1],
-                                    "equity_before": float(equity),
-                                    "maintenance_margin_required": float(total_margin_used),
-                                    "bars": execution_bars,
-                                    "positions": positions_before_liq,
-                                }
+                        if _in_score_window(
+                            ts_utc, score_start_utc=score_start_utc, score_end_utc=score_end_utc
+                        ):
+                            f_trade_debug.write(
+                                json.dumps(
+                                    {
+                                        "timestamp": ts.isoformat(),
+                                        "event": "liquidation",
+                                        "trade": liq_trade,
+                                        "equity_before": float(equity),
+                                        "maintenance_margin_required": float(total_margin_used),
+                                        "bars": execution_bars,
+                                        "positions": positions_before_liq,
+                                    }
+                                )
+                                + "\n"
                             )
-                            + "\n"
-                        )
 
                     position_qty[s] = 0.0
                     entry_prices[s] = 0.0
@@ -302,7 +324,15 @@ def run_derivatives_backtest(
 
             # Process Pending Orders (from previous bar's decision)
             if i > 0 and pending_target_exposures is not None:
-                targets = pending_target_exposures
+                targets: dict[str, float] = {
+                    s: float(pending_target_exposures.get(s, 0.0) or 0.0) for s in symbols
+                }
+                if not bool(cfg.allow_short):
+                    targets = {s: max(0.0, float(v)) for s, v in targets.items()}
+                if no_trade_before_utc is not None and ts_utc <= no_trade_before_utc:
+                    targets = {s: float(current_targets.get(s, 0.0)) for s in symbols}
+                    if not bool(cfg.allow_short):
+                        targets = {s: max(0.0, float(v)) for s, v in targets.items()}
                 
                 # Execution
                 for s in symbols:
@@ -422,7 +452,7 @@ def run_derivatives_backtest(
                     position_qty[s] = new_qty
                     current_targets[s] = target_pct
                     
-                    trades_rows.append({
+                    trade_row = {
                         "timestamp": ts.isoformat(),
                         "symbol": s,
                         "side": "BUY" if delta_q > 0 else "SELL",
@@ -437,23 +467,30 @@ def run_derivatives_backtest(
                         "position_qty_after": new_qty,
                         "strategy_reason": pending_reason,
                         "liquidation": 0,
-                    })
+                    }
+                    if _in_score_window(
+                        ts_utc, score_start_utc=score_start_utc, score_end_utc=score_end_utc
+                    ):
+                        trades_rows.append(trade_row)
 
                     if f_trade_debug is not None:
-                        f_trade_debug.write(
-                            json.dumps(
-                                {
-                                    "timestamp": ts.isoformat(),
-                                    "trade": trades_rows[-1],
-                                    "decision": pending_decision_context,
-                                    "execution": {
+                        if _in_score_window(
+                            ts_utc, score_start_utc=score_start_utc, score_end_utc=score_end_utc
+                        ):
+                            f_trade_debug.write(
+                                json.dumps(
+                                    {
                                         "timestamp": ts.isoformat(),
-                                        "bars": execution_bars,
-                                    },
-                                }
+                                        "trade": trade_row,
+                                        "decision": pending_decision_context,
+                                        "execution": {
+                                            "timestamp": ts.isoformat(),
+                                            "bars": execution_bars,
+                                        },
+                                    }
+                                )
+                                + "\n"
                             )
-                            + "\n"
-                        )
 
                 pending_target_exposures = None
                 pending_reason = None
@@ -525,7 +562,10 @@ def run_derivatives_backtest(
                 row[f"{s}_position_qty"] = position_qty[s]
                 row[f"{s}_holding_bars"] = holding_bars[s]
                 row[f"{s}_funding_rate"] = float(current_funding_rates.get(s, 0.0) or 0.0)
-            equity_rows.append(row)
+            if _in_score_window(
+                ts_utc, score_start_utc=score_start_utc, score_end_utc=score_end_utc
+            ):
+                equity_rows.append(row)
 
             # Update "previous" trackers for the next bar
             prev_equity = equity
@@ -556,9 +596,12 @@ def run_derivatives_backtest(
             # Strategy Step
             if i < len(idx) - 1:
                 next_ts = pd.Timestamp(idx[i+1])
+                decision_ts_utc = _to_utc_timestamp(next_ts)
                 state = StrategyState(
                     timestamp=next_ts,
-                    allow_short=True, # Always allowed in perps
+                    # Perpetual futures allow shorting, but we still respect the backtest
+                    # configuration flag so users can run long-only variants.
+                    allow_short=bool(cfg.allow_short),
                     cash=cash,
                     positions={s: position_qty[s] for s in symbols},
                     equity=equity,
@@ -580,6 +623,8 @@ def run_derivatives_backtest(
                 decision = strategy.target_exposures(history, state)
                 
                 pending_target_exposures = decision.target_exposures
+                if no_trade_before_utc is not None and decision_ts_utc <= no_trade_before_utc:
+                    pending_target_exposures = {s: 0.0 for s in symbols}
                 pending_reason = decision.reason
                 
                 # Log decision
@@ -622,7 +667,9 @@ def run_derivatives_backtest(
                         "debug": decision.debug,
                         "snapshot": decision_row["snapshot"],
                     }
-                if f_decisions is not None:
+                if f_decisions is not None and _in_score_window(
+                    decision_ts_utc, score_start_utc=score_start_utc, score_end_utc=score_end_utc
+                ):
                     f_decisions.write(json.dumps(decision_row) + "\n")
 
     # Output generation
@@ -648,7 +695,9 @@ def run_derivatives_backtest(
         metrics = compute_metrics(equity_curve, trades)
         (run_dir / "metrics.json").write_text(json.dumps(metrics.to_dict(), indent=2))
     
-    logger.info(f"Derivatives backtest done. Final Eq: {equity:.2f}")
+    # Keep the engine quiet by default (important for tuning runs that invoke thousands of
+    # backtests). The CLI/TUI already prints a human summary.
+    logger.debug("Derivatives backtest done. Final Eq: %.2f", float(equity))
 
     return BacktestOutputs(
         run_dir=run_dir,

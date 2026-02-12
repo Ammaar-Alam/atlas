@@ -17,6 +17,7 @@ class BarTimeframe:
 
 _TF_MIN_RE = re.compile(r"^(?P<n>\d+)\s*(?:min|m)$", re.IGNORECASE)
 _TF_HOUR_RE = re.compile(r"^(?P<n>\d+)\s*(?:h|hr|hour|hours)$", re.IGNORECASE)
+_TF_DAY_RE = re.compile(r"^(?P<n>\d+)\s*(?:d|day|days)$", re.IGNORECASE)
 
 
 def parse_bar_timeframe(value: str) -> BarTimeframe:
@@ -42,7 +43,17 @@ def parse_bar_timeframe(value: str) -> BarTimeframe:
         minutes = hours * 60
         return BarTimeframe(name=f"{hours}H", minutes=minutes)
 
-    raise ValueError("unsupported bar timeframe, expected like 1Min, 5Min, 30Min, 1H, 4H")
+    m = _TF_DAY_RE.match(value)
+    if m:
+        days = int(m.group("n"))
+        if days <= 0:
+            raise ValueError("bar timeframe days must be > 0")
+        minutes = days * 1440
+        return BarTimeframe(name=f"{days}D", minutes=minutes)
+
+    raise ValueError(
+        "unsupported bar timeframe, expected like 1Min, 5Min, 15Min, 30Min, 1H, 4H, 6H, 1D"
+    )
 
 
 def resample_ohlcv(

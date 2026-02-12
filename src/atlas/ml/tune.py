@@ -170,15 +170,386 @@ def _hedge_space() -> list[Param]:
         FloatRange("flip_hysteresis_bps", 0.0, 10.0, decimals=4),
     ]
 
+def _crypto_ensemble_space() -> list[Param]:
+    # Keep the search space deliberately constrained: focus on signal/regime + primary risk knobs.
+    return [
+        IntRange("ema_fast", 8, 80, log=True),
+        IntRange("ema_slow", 24, 260, log=True),
+        IntRange("atr_window", 8, 80, log=True),
+        IntRange("er_window", 10, 160, log=True),
+        IntRange("breakout_window", 12, 260, log=True),
+        IntRange("momentum_window", 24, 720, log=True),
+        FloatRange("er_trend_min", 0.20, 0.90, decimals=3),
+        FloatRange("er_range_max", 0.05, 0.50, decimals=3),
+        FloatRange("trend_z_min", 0.05, 0.80, decimals=3),
+        FloatRange("min_atr_bps", 1.0, 25.0, decimals=3),
+        IntRange("meanrev_ewm_span", 20, 360, log=True),
+        FloatRange("meanrev_entry_z", 0.75, 3.50, decimals=3),
+        FloatRange("breakout_buffer_bps", 0.0, 12.0, decimals=3),
+        IntRange("max_positions", 1, 6),
+        FloatRange("max_gross_exposure", 0.25, 1.25, decimals=4),
+        FloatRange("risk_budget", 0.002, 0.10, log=True, decimals=6),
+        FloatRange("stop_atr_mult", 1.0, 6.0, decimals=3),
+        FloatRange("trail_atr_mult", 1.2, 12.0, decimals=3),
+        IntRange("cooldown_bars", 0, 24),
+        IntRange("flip_confirm_bars", 1, 6),
+        FloatRange("k_cost", 0.25, 8.0, decimals=3),
+        FloatRange("edge_floor_bps", 0.0, 30.0, decimals=3),
+    ]
+
+def _crypto_tsm_space() -> list[Param]:
+    # Time-series momentum / trend. Keep the space modest to avoid overfitting.
+    return [
+        IntRange("ema_fast", 6, 96, log=True),
+        IntRange("ema_slow", 24, 360, log=True),
+        IntRange("atr_window", 8, 120, log=True),
+        FloatRange("min_atr_bps", 1.0, 25.0, decimals=3),
+        IntRange("momentum_window", 12, 960, log=True),
+        IntRange("confirm_bars", 1, 8),
+        IntRange("exit_confirm_bars", 1, 8),
+        IntRange("max_positions", 1, 6),
+        FloatRange("max_gross_exposure", 0.25, 1.50, decimals=4),
+        FloatRange("risk_budget", 0.002, 0.25, log=True, decimals=6),
+        FloatRange("stop_atr_mult", 1.0, 8.0, decimals=3),
+        FloatRange("trail_atr_mult", 1.2, 16.0, decimals=3),
+        IntRange("cooldown_bars", 0, 48),
+        IntRange("rebalance_interval_bars", 1, 24),
+        FloatRange("k_cost", 0.25, 8.0, decimals=3),
+        FloatRange("edge_floor_bps", 0.0, 40.0, decimals=3),
+    ]
+
+def _crypto_rotation_space() -> list[Param]:
+    # Cross-sectional rotation. Keep the space modest and validate key ordering constraints.
+    return [
+        IntRange("rebalance_interval_bars", 4, 84, log=True),
+        IntRange("mom_short_bars", 6, 84, log=True),
+        IntRange("mom_med_bars", 24, 360, log=True),
+        IntRange("mom_long_bars", 72, 960, log=True),
+        IntRange("vol_window_bars", 24, 480, log=True),
+        FloatRange("vol_target_bps_per_bar", 20.0, 180.0, decimals=3),
+        IntRange("top_k", 1, 5),
+        FloatRange("max_total_exposure", 0.25, 1.50, decimals=4),
+        FloatRange("max_exposure_per_symbol", 0.10, 1.00, decimals=4),
+        FloatRange("rebalance_exposure_threshold", 0.0, 0.12, decimals=4),
+        FloatRange("score_floor", -0.25, 0.50, decimals=4),
+        FloatRange("k_cost", 0.25, 6.0, decimals=3),
+        FloatRange("edge_floor_bps", 0.0, 40.0, decimals=3),
+    ]
+
+
+def _crypto_momentum_space() -> list[Param]:
+    return [
+        IntRange("momentum_window_bars", 24, 960, log=True),
+        FloatRange("max_total_exposure", 0.20, 1.50, decimals=4),
+        FloatRange("max_exposure_per_symbol", 0.20, 1.25, decimals=4),
+        IntRange("rebalance_interval_bars", 1, 56, log=True),
+        FloatRange("rebalance_exposure_threshold", 0.0, 0.25, decimals=4),
+        FloatRange("min_trade_notional_usd", 1.0, 50.0, decimals=3),
+        IntRange("heartbeat_every_bars", 0, 84),
+        FloatRange("heartbeat_notional_usd", 0.0, 10.0, decimals=3),
+    ]
+
+
+def _crypto_regime_fusion_space() -> list[Param]:
+    return [
+        IntRange("regime_momentum_bars", 48, 240, log=True),
+        IntRange("regime_er_bars", 32, 160, log=True),
+        IntRange("regime_ema_fast", 8, 48, log=True),
+        IntRange("regime_ema_slow", 24, 192, log=True),
+        FloatRange("regime_trend_mom", 0.005, 0.040, decimals=4),
+        FloatRange("regime_trend_er_min", 0.15, 0.60, decimals=3),
+        FloatRange("regime_trend_strength_min", 0.05, 0.60, decimals=3),
+        FloatRange("regime_range_abs_mom_max", 0.001, 0.030, decimals=4),
+        FloatRange("regime_range_er_max", 0.05, 0.40, decimals=3),
+        IntRange("momentum_window_bars", 48, 240, log=True),
+        IntRange("vol_window_bars", 24, 160, log=True),
+        IntRange("trend_top_k", 1, 4),
+        FloatRange("max_total_exposure", 0.30, 1.20, decimals=4),
+        FloatRange("max_exposure_per_symbol", 0.15, 1.00, decimals=4),
+        FloatRange("neutral_exposure_scale", 0.0, 0.60, decimals=4),
+        IntRange("meanrev_window_bars", 24, 168, log=True),
+        FloatRange("meanrev_entry_z", 0.8, 3.0, decimals=3),
+        FloatRange("meanrev_exit_z", 0.2, 1.5, decimals=3),
+        FloatRange("range_min_exposure", 0.0, 0.40, decimals=4),
+        FloatRange("range_max_exposure", 0.10, 0.80, decimals=4),
+        IntRange("rebalance_interval_bars", 2, 32, log=True),
+        FloatRange("rebalance_exposure_threshold", 0.0, 0.15, decimals=4),
+        FloatRange("daily_loss_limit", 0.01, 0.08, decimals=4),
+        FloatRange("kill_switch", 0.05, 0.30, decimals=4),
+        IntRange("kill_switch_cooldown_days", 1, 7),
+        IntRange("heartbeat_every_bars", 0, 84),
+        FloatRange("heartbeat_notional_usd", 0.0, 10.0, decimals=3),
+        FloatRange("heartbeat_max_exposure_delta", 0.0, 0.10, decimals=4),
+    ]
+
+
+def _crypto_regime_vol_target_space() -> list[Param]:
+    return [
+        IntRange("fast_window", 8, 64, log=True),
+        IntRange("slow_window", 24, 220, log=True),
+        IntRange("regime_window", 80, 360, log=True),
+        IntRange("regime_slope_bars", 2, 48, log=True),
+        IntRange("momentum_window_bars", 24, 360, log=True),
+        IntRange("atr_window", 8, 80, log=True),
+        IntRange("top_k", 1, 4),
+        FloatRange("target_vol_bps_per_bar", 10.0, 160.0, decimals=3),
+        FloatRange("max_total_exposure", 0.20, 1.50, decimals=4),
+        FloatRange("max_exposure_per_symbol", 0.10, 1.00, decimals=4),
+        IntRange("rebalance_interval_bars", 1, 32, log=True),
+        FloatRange("rebalance_exposure_threshold", 0.0, 0.20, decimals=4),
+        FloatRange("market_drawdown_reduce", 0.02, 0.25, decimals=4),
+        FloatRange("market_drawdown_off", 0.05, 0.40, decimals=4),
+        IntRange("market_peak_lookback_bars", 48, 480, log=True),
+        FloatRange("weekly_loss_limit", 0.01, 0.08, decimals=4),
+        FloatRange("weekly_profit_target", 0.005, 0.08, decimals=4),
+        FloatRange("daily_loss_limit", 0.005, 0.08, decimals=4),
+        FloatRange("kill_switch", 0.02, 0.30, decimals=4),
+        IntRange("kill_switch_cooldown_days", 1, 14),
+        FloatRange("trailing_stop_pct", 0.02, 0.25, decimals=4),
+        IntRange("min_hold_bars", 1, 32),
+    ]
+
+
+def _crypto_vol_squeeze_space() -> list[Param]:
+    return [
+        IntRange("rebalance_interval_bars", 8, 56, log=True),
+        FloatRange("rebalance_exposure_threshold", 0.0, 0.20, decimals=4),
+        IntRange("bb_window", 10, 80, log=True),
+        FloatRange("bb_k", 1.2, 3.5, decimals=3),
+        IntRange("squeeze_lookback", 40, 320, log=True),
+        FloatRange("squeeze_percentile", 0.05, 0.45, decimals=4),
+        IntRange("donchian_window", 10, 120, log=True),
+        IntRange("atr_window", 8, 80, log=True),
+        FloatRange("min_atr_bps", 1.0, 40.0, decimals=3),
+        FloatRange("entry_breakout_buffer_bps", 0.0, 25.0, decimals=3),
+        FloatRange("expected_move_atr_mult", 0.8, 5.0, decimals=3),
+        FloatRange("cost_k", 0.25, 8.0, decimals=3),
+        FloatRange("edge_floor_bps", 0.0, 30.0, decimals=3),
+        FloatRange("max_total_exposure", 0.20, 1.50, decimals=4),
+        FloatRange("max_exposure_per_symbol", 0.10, 1.00, decimals=4),
+        FloatRange("vol_target_bps_per_bar", 10.0, 180.0, decimals=3),
+        FloatRange("exposure_scale_on_squeeze", 0.0, 1.5, decimals=4),
+        IntRange("min_hold_bars", 1, 40),
+        IntRange("max_hold_bars", 4, 168, log=True),
+        IntRange("exit_mom_bars", 4, 120, log=True),
+        FloatRange("exit_mom_threshold", -0.02, 0.02, decimals=4),
+        FloatRange("daily_loss_limit", 0.005, 0.08, decimals=4),
+        FloatRange("kill_switch", 0.02, 0.30, decimals=4),
+        IntRange("kill_switch_cooldown_days", 1, 14),
+        FloatRange("market_drawdown_reduce", 0.02, 0.25, decimals=4),
+        FloatRange("market_drawdown_off", 0.05, 0.40, decimals=4),
+        FloatRange("market_vol_reduce_bps", 40.0, 260.0, decimals=3),
+        FloatRange("market_vol_off_bps", 80.0, 400.0, decimals=3),
+    ]
+
+
+def _crypto_weekly_lock_momentum_space() -> list[Param]:
+    return [
+        IntRange("rebalance_interval_bars", 2, 32, log=True),
+        FloatRange("rebalance_exposure_threshold", 0.0, 0.20, decimals=4),
+        IntRange("mom_short_bars", 8, 84, log=True),
+        IntRange("mom_med_bars", 24, 168, log=True),
+        IntRange("mom_long_bars", 72, 720, log=True),
+        FloatRange("w_mom_short", 0.0, 1.0, decimals=4),
+        FloatRange("w_mom_med", 0.0, 1.0, decimals=4),
+        FloatRange("w_mom_long", 0.0, 1.0, decimals=4),
+        IntRange("vol_window_bars", 24, 240, log=True),
+        IntRange("top_k", 1, 4),
+        FloatRange("score_floor", -0.25, 0.50, decimals=4),
+        FloatRange("max_total_exposure", 0.20, 1.50, decimals=4),
+        FloatRange("max_exposure_per_symbol", 0.10, 1.00, decimals=4),
+        FloatRange("vol_target_bps_per_bar", 10.0, 220.0, decimals=3),
+        IntRange("regime_ema_bars", 24, 360, log=True),
+        IntRange("regime_mom_bars", 12, 240, log=True),
+        FloatRange("regime_mom_off", -0.05, 0.05, decimals=4),
+        FloatRange("regime_dd_reduce", 0.02, 0.25, decimals=4),
+        FloatRange("regime_dd_off", 0.05, 0.40, decimals=4),
+        IntRange("regime_peak_lookback_bars", 24, 480, log=True),
+        FloatRange("weekly_profit_target", 0.002, 0.04, decimals=4),
+        FloatRange("weekly_loss_limit", 0.002, 0.06, decimals=4),
+        FloatRange("daily_loss_limit", 0.005, 0.08, decimals=4),
+        FloatRange("kill_switch", 0.02, 0.30, decimals=4),
+        IntRange("kill_switch_cooldown_days", 1, 14),
+    ]
+
+
+def _perp_quant_fusion_space() -> list[Param]:
+    return [
+        IntRange("atr_window", 8, 48, log=True),
+        IntRange("ema_fast", 6, 48, log=True),
+        IntRange("ema_slow", 20, 200, log=True),
+        IntRange("er_window", 8, 64, log=True),
+        IntRange("choppiness_window", 8, 48, log=True),
+        IntRange("breakout_window", 8, 96, log=True),
+        FloatRange("breakout_buffer_bps", 0.0, 12.0, decimals=3),
+        FloatRange("trend_z_min", 0.05, 1.0, decimals=3),
+        FloatRange("er_min", 0.10, 0.80, decimals=3),
+        FloatRange("er_exit_min", 0.05, 0.70, decimals=3),
+        FloatRange("choppiness_max", 45.0, 75.0, decimals=3),
+        FloatRange("choppiness_exit_max", 50.0, 85.0, decimals=3),
+        FloatRange("min_atr_bps", 0.5, 25.0, decimals=3),
+        FloatRange("edge_floor_bps", 0.0, 30.0, decimals=3),
+        FloatRange("k_cost", 0.25, 6.0, decimals=3),
+        FloatRange("risk_budget", 0.002, 0.10, log=True, decimals=6),
+        FloatRange("stop_atr_mult", 0.8, 6.0, decimals=3),
+        IntRange("max_positions", 1, 4),
+        FloatRange("max_gross_exposure", 0.20, 2.0, decimals=4),
+        FloatRange("max_per_symbol_exposure", 0.10, 1.0, decimals=4),
+        FloatRange("rebalance_exposure_threshold", 0.0, 0.20, decimals=4),
+        IntRange("min_hold_bars", 1, 16),
+        IntRange("flip_confirm_bars", 1, 8),
+        FloatRange("daily_loss_limit", 0.005, 0.08, decimals=4),
+        FloatRange("kill_switch", 0.02, 0.30, decimals=4),
+        FloatRange("weekly_profit_target", 0.005, 0.08, decimals=4),
+        FloatRange("weekly_lock_risk_scale", 0.0, 1.0, decimals=4),
+        FloatRange("heartbeat_exposure", 0.0, 0.10, decimals=4),
+        IntRange("heartbeat_hold_bars", 1, 8),
+    ]
+
+
+def _perp_trend_vol_guard_space() -> list[Param]:
+    return [
+        IntRange("ema_fast", 4, 48, log=True),
+        IntRange("ema_slow", 12, 220, log=True),
+        IntRange("momentum_window_bars", 6, 96, log=True),
+        IntRange("breakout_window", 8, 96, log=True),
+        FloatRange("breakout_buffer_bps", 0.0, 14.0, decimals=3),
+        IntRange("atr_window", 8, 80, log=True),
+        FloatRange("trend_strength_min", 0.05, 1.20, decimals=3),
+        FloatRange("min_atr_bps", 0.5, 30.0, decimals=3),
+        FloatRange("edge_floor_bps", 0.0, 30.0, decimals=3),
+        FloatRange("k_cost", 0.25, 8.0, decimals=3),
+        FloatRange("risk_budget", 0.001, 0.08, log=True, decimals=6),
+        FloatRange("stop_atr_mult", 0.8, 8.0, decimals=3),
+        FloatRange("target_vol_bps_per_bar", 10.0, 220.0, decimals=3),
+        IntRange("max_positions", 1, 4),
+        FloatRange("max_gross_exposure", 0.20, 2.0, decimals=4),
+        FloatRange("max_per_symbol_exposure", 0.10, 1.0, decimals=4),
+        IntRange("rebalance_interval_bars", 1, 16, log=True),
+        FloatRange("rebalance_exposure_threshold", 0.0, 0.20, decimals=4),
+        IntRange("min_hold_bars", 1, 32),
+        IntRange("flip_confirm_bars", 1, 8),
+        FloatRange("market_vol_reduce_bps", 10.0, 300.0, decimals=3),
+        FloatRange("market_vol_off_bps", 20.0, 450.0, decimals=3),
+        FloatRange("weekly_loss_limit", 0.005, 0.08, decimals=4),
+        FloatRange("weekly_profit_target", 0.005, 0.08, decimals=4),
+        FloatRange("weekly_lock_risk_scale", 0.0, 1.0, decimals=4),
+        FloatRange("daily_loss_limit", 0.005, 0.08, decimals=4),
+        FloatRange("kill_switch", 0.02, 0.30, decimals=4),
+    ]
+
+
+def _perp_weekly_carry_shield_space() -> list[Param]:
+    return [
+        IntRange("atr_window", 8, 80, log=True),
+        IntRange("ema_fast", 4, 48, log=True),
+        IntRange("ema_slow", 12, 200, log=True),
+        IntRange("er_window", 6, 80, log=True),
+        IntRange("choppiness_window", 6, 80, log=True),
+        IntRange("momentum_bars", 4, 120, log=True),
+        FloatRange("trend_z_min", 0.05, 1.0, decimals=3),
+        FloatRange("er_min", 0.10, 0.90, decimals=3),
+        FloatRange("choppiness_max", 40.0, 80.0, decimals=3),
+        FloatRange("momentum_threshold_bps", 0.0, 200.0, decimals=3),
+        FloatRange("min_atr_bps", 0.5, 25.0, decimals=3),
+        FloatRange("edge_floor_bps", 0.0, 30.0, decimals=3),
+        FloatRange("k_cost", 0.25, 8.0, decimals=3),
+        FloatRange("expected_move_atr_mult", 0.8, 6.0, decimals=3),
+        FloatRange("risk_budget", 0.001, 0.05, log=True, decimals=6),
+        FloatRange("stop_atr_mult", 0.8, 8.0, decimals=3),
+        FloatRange("max_margin_utilization", 0.05, 0.95, decimals=4),
+        FloatRange("max_leverage", 1.0, 15.0, decimals=4),
+        IntRange("max_positions", 1, 4),
+        FloatRange("max_gross_exposure", 0.20, 2.0, decimals=4),
+        FloatRange("max_per_symbol_exposure", 0.10, 1.0, decimals=4),
+        IntRange("min_hold_bars", 1, 24),
+        FloatRange("rebalance_exposure_threshold", 0.0, 0.20, decimals=4),
+        FloatRange("daily_loss_limit", 0.003, 0.08, decimals=4),
+        FloatRange("kill_switch", 0.02, 0.30, decimals=4),
+        FloatRange("weekly_profit_target", 0.001, 0.03, decimals=4),
+        FloatRange("weekly_loss_limit", 0.001, 0.03, decimals=4),
+        FloatRange("weekly_heartbeat_exposure", 0.0, 0.10, decimals=4),
+        IntRange("weekly_heartbeat_hold_bars", 1, 8),
+    ]
+
+
+def _perp_weekly_profit_chase_space() -> list[Param]:
+    return [
+        IntRange("atr_window", 8, 60, log=True),
+        IntRange("opening_range_minutes", 15, 120, log=True),
+        FloatRange("breakout_buffer_bps", 0.0, 12.0, decimals=3),
+        FloatRange("min_atr_bps", 1.0, 20.0, decimals=3),
+        FloatRange("weekly_profit_target", 0.005, 0.05, decimals=4),
+        FloatRange("weekly_chase_k", 0.0, 5.0, decimals=3),
+        FloatRange("risk_per_trade", 0.005, 0.10, log=True, decimals=6),
+        FloatRange("base_leverage", 1.0, 20.0, decimals=3),
+        FloatRange("max_leverage", 2.0, 25.0, decimals=3),
+        FloatRange("max_margin_utilization", 0.10, 0.95, decimals=4),
+        FloatRange("stop_atr_mult", 1.0, 6.0, decimals=3),
+        FloatRange("min_liq_buffer_atr", 1.0, 12.0, decimals=3),
+        FloatRange("weekly_heartbeat_exposure", 0.0, 0.10, decimals=4),
+        IntRange("weekly_heartbeat_hold_bars", 1, 12),
+        IntRange("max_flips_per_day", 1, 6),
+        FloatRange("daily_loss_hard_stop", 0.0, 0.06, decimals=4),
+        FloatRange("weekly_loss_hard_stop", 0.0, 0.15, decimals=4),
+        IntRange("cooldown_bars_after_exit", 0, 192),
+        FloatRange("trailing_stop_atr_mult", 0.0, 6.0, decimals=3),
+        FloatRange("break_even_trigger_atr", 0.0, 4.0, decimals=3),
+        IntRange("max_hold_bars", 0, 192),
+    ]
+
+
+def _perp_weekly_trend_reset_space() -> list[Param]:
+    return [
+        IntRange("lookback_days", 5, 60, log=True),
+        FloatRange("momentum_threshold_bps", 0.0, 250.0, decimals=3),
+        IntRange("ema_fast", 4, 48, log=True),
+        IntRange("ema_slow", 12, 240, log=True),
+        IntRange("atr_window", 8, 60, log=True),
+        FloatRange("target_leverage", 1.0, 30.0, decimals=3),
+        FloatRange("max_margin_utilization", 0.10, 0.95, decimals=4),
+        FloatRange("stop_atr_mult", 1.0, 8.0, decimals=3),
+        FloatRange("trail_atr_mult", 1.2, 16.0, decimals=3),
+        FloatRange("min_liq_buffer_atr", 1.0, 12.0, decimals=3),
+        FloatRange("heartbeat_exposure", 0.0, 0.20, decimals=4),
+        IntRange("heartbeat_hold_bars", 2, 96, log=True),
+    ]
+
 
 def get_search_space(strategy: str) -> list[Param]:
     strategy = (strategy or "").strip().lower().replace("-", "_")
     if strategy == "perp_flare":
         return _perp_flare_space()
+    if strategy == "perp_weekly_trend_reset":
+        return _perp_weekly_trend_reset_space()
+    if strategy == "perp_weekly_profit_chase":
+        return _perp_weekly_profit_chase_space()
     if strategy == "orb_trend":
         return _orb_trend_space()
     if strategy == "hedge":
         return _hedge_space()
+    if strategy == "crypto_ensemble":
+        return _crypto_ensemble_space()
+    if strategy == "crypto_tsm":
+        return _crypto_tsm_space()
+    if strategy == "crypto_rotation":
+        return _crypto_rotation_space()
+    if strategy == "crypto_momentum":
+        return _crypto_momentum_space()
+    if strategy == "crypto_regime_vol_target":
+        return _crypto_regime_vol_target_space()
+    if strategy == "crypto_regime_fusion":
+        return _crypto_regime_fusion_space()
+    if strategy == "crypto_vol_squeeze":
+        return _crypto_vol_squeeze_space()
+    if strategy == "crypto_weekly_lock_momentum":
+        return _crypto_weekly_lock_momentum_space()
+    if strategy == "perp_quant_fusion":
+        return _perp_quant_fusion_space()
+    if strategy == "perp_trend_vol_guard":
+        return _perp_trend_vol_guard_space()
+    if strategy == "perp_weekly_carry_shield":
+        return _perp_weekly_carry_shield_space()
     raise ValueError(f"no tuning space defined for strategy: {strategy}")
 
 
@@ -195,6 +566,76 @@ def _validate_perp_flare_params(params: dict[str, Any]) -> bool:
         if not (0.0 < float(params["max_margin_utilization"]) <= 1.0):
             return False
         if float(params["max_leverage"]) <= 0:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _validate_perp_weekly_profit_chase_params(params: dict[str, Any]) -> bool:
+    try:
+        if int(params["atr_window"]) < 2:
+            return False
+        if int(params["opening_range_minutes"]) <= 0:
+            return False
+        if float(params["weekly_profit_target"]) <= 0:
+            return False
+        if float(params["risk_per_trade"]) <= 0:
+            return False
+        if float(params["base_leverage"]) <= 0:
+            return False
+        if float(params["max_leverage"]) <= 0:
+            return False
+        if float(params["max_leverage"]) < float(params["base_leverage"]):
+            return False
+        if not (0.0 < float(params["max_margin_utilization"]) <= 1.0):
+            return False
+        if float(params["stop_atr_mult"]) <= 0:
+            return False
+        if float(params["min_liq_buffer_atr"]) < 0:
+            return False
+        if float(params["weekly_heartbeat_exposure"]) < 0:
+            return False
+        if int(params["weekly_heartbeat_hold_bars"]) < 1:
+            return False
+        if int(params["max_flips_per_day"]) < 1:
+            return False
+        if float(params.get("daily_loss_hard_stop", 0.0)) < 0.0:
+            return False
+        if float(params.get("weekly_loss_hard_stop", 0.0)) < 0.0:
+            return False
+        if int(params.get("cooldown_bars_after_exit", 0)) < 0:
+            return False
+        if float(params.get("trailing_stop_atr_mult", 0.0)) < 0.0:
+            return False
+        if float(params.get("break_even_trigger_atr", 0.0)) < 0.0:
+            return False
+        if int(params.get("max_hold_bars", 0)) < 0:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _validate_perp_weekly_trend_reset_params(params: dict[str, Any]) -> bool:
+    try:
+        if int(params["ema_fast"]) >= int(params["ema_slow"]):
+            return False
+        if int(params["lookback_days"]) <= 0:
+            return False
+        if int(params["atr_window"]) < 2:
+            return False
+        if float(params["target_leverage"]) <= 0:
+            return False
+        if not (0.0 < float(params["max_margin_utilization"]) <= 1.0):
+            return False
+        if float(params["trail_atr_mult"]) < float(params["stop_atr_mult"]):
+            return False
+        if float(params["min_liq_buffer_atr"]) < 0:
+            return False
+        if float(params["heartbeat_exposure"]) < 0:
+            return False
+        if int(params["heartbeat_hold_bars"]) < 1:
             return False
         return True
     except Exception:
@@ -267,10 +708,638 @@ def validate_params(strategy: str, params: dict[str, Any]) -> bool:
     strategy = (strategy or "").strip().lower().replace("-", "_")
     if strategy == "perp_flare":
         return _validate_perp_flare_params(params)
+    if strategy == "perp_weekly_trend_reset":
+        return _validate_perp_weekly_trend_reset_params(params)
+    if strategy == "perp_weekly_profit_chase":
+        return _validate_perp_weekly_profit_chase_params(params)
     if strategy == "orb_trend":
         return _validate_orb_trend_params(params)
     if strategy == "hedge":
         return _validate_hedge_params(params)
+    if strategy == "crypto_ensemble":
+        try:
+            if int(params.get("ema_fast", 0)) >= int(params.get("ema_slow", 0)):
+                return False
+            if float(params.get("trail_atr_mult", 0.0)) < float(params.get("stop_atr_mult", 0.0)):
+                return False
+            er_trend_min = float(params.get("er_trend_min", 0.0))
+            er_range_max = float(params.get("er_range_max", 0.0))
+            if not (0.0 < er_range_max < er_trend_min <= 1.0):
+                return False
+            if int(params.get("atr_window", 0)) < 2:
+                return False
+            if int(params.get("er_window", 0)) < 2:
+                return False
+            if int(params.get("breakout_window", 0)) < 2:
+                return False
+            if int(params.get("momentum_window", 0)) < 2:
+                return False
+            if float(params.get("risk_budget", 0.0)) <= 0:
+                return False
+            if float(params.get("max_gross_exposure", 0.0)) <= 0:
+                return False
+            if int(params.get("max_positions", 0)) <= 0:
+                return False
+            if float(params.get("k_cost", 0.0)) < 0:
+                return False
+            if float(params.get("edge_floor_bps", 0.0)) < 0:
+                return False
+            if float(params.get("min_atr_bps", 0.0)) < 0:
+                return False
+            if float(params.get("breakout_buffer_bps", 0.0)) < 0:
+                return False
+            if float(params.get("meanrev_entry_z", 0.0)) <= 0:
+                return False
+            return True
+        except Exception:
+            return False
+    if strategy == "crypto_tsm":
+        try:
+            if int(params.get("ema_fast", 0)) >= int(params.get("ema_slow", 0)):
+                return False
+            if float(params.get("trail_atr_mult", 0.0)) < float(params.get("stop_atr_mult", 0.0)):
+                return False
+            if int(params.get("atr_window", 0)) < 2:
+                return False
+            if float(params.get("min_atr_bps", 0.0)) < 0:
+                return False
+            if int(params.get("momentum_window", 0)) < 2:
+                return False
+            if int(params.get("confirm_bars", 0)) <= 0:
+                return False
+            if int(params.get("exit_confirm_bars", 0)) <= 0:
+                return False
+            min_hold_bars = 0
+            if "min_hold_bars" in params:
+                min_hold_bars = int(params.get("min_hold_bars", 0))
+                if min_hold_bars < 0:
+                    return False
+            if "max_hold_bars" in params:
+                max_hold_bars = int(params.get("max_hold_bars", 0))
+                if max_hold_bars < 0:
+                    return False
+                if max_hold_bars > 0 and max_hold_bars < int(min_hold_bars):
+                    return False
+            if "take_profit_atr_mult" in params and float(params.get("take_profit_atr_mult", 0.0)) < 0:
+                return False
+            if float(params.get("risk_budget", 0.0)) <= 0:
+                return False
+            if float(params.get("max_gross_exposure", 0.0)) <= 0:
+                return False
+            if int(params.get("max_positions", 0)) <= 0:
+                return False
+            if int(params.get("rebalance_interval_bars", 0)) <= 0:
+                return False
+            if float(params.get("k_cost", 0.0)) < 0:
+                return False
+            if float(params.get("edge_floor_bps", 0.0)) < 0:
+                return False
+            if ("market_drawdown_reduce" in params) or ("market_drawdown_off" in params):
+                md_reduce = float(params.get("market_drawdown_reduce", 0.0) or 0.0)
+                md_off = float(params.get("market_drawdown_off", 0.0) or 0.0)
+                if not (0.0 < md_reduce < md_off < 1.0):
+                    return False
+            if ("market_vol_reduce_bps" in params) or ("market_vol_off_bps" in params):
+                vol_reduce = float(params.get("market_vol_reduce_bps", 0.0) or 0.0)
+                vol_off = float(params.get("market_vol_off_bps", 0.0) or 0.0)
+                if not (0.0 < vol_reduce < vol_off):
+                    return False
+            if "market_peak_halflife_bars" in params and int(params.get("market_peak_halflife_bars", 0)) <= 0:
+                return False
+            return True
+        except Exception:
+            return False
+    if strategy == "crypto_rotation":
+        try:
+            if int(params.get("rebalance_interval_bars", 0)) <= 0:
+                return False
+            mom_s = int(params.get("mom_short_bars", 0) or 0)
+            mom_m = int(params.get("mom_med_bars", 0) or 0)
+            mom_l = int(params.get("mom_long_bars", 0) or 0)
+            if not (0 < mom_s < mom_m < mom_l):
+                return False
+            if int(params.get("vol_window_bars", 0)) < 2:
+                return False
+            if float(params.get("vol_target_bps_per_bar", 0.0)) < 0:
+                return False
+            if int(params.get("top_k", 0)) <= 0:
+                return False
+            if float(params.get("max_total_exposure", 0.0)) <= 0:
+                return False
+            if float(params.get("max_exposure_per_symbol", 0.0)) <= 0:
+                return False
+            if float(params.get("rebalance_exposure_threshold", 0.0)) < 0:
+                return False
+            if float(params.get("k_cost", 0.0)) < 0:
+                return False
+            if float(params.get("edge_floor_bps", 0.0)) < 0:
+                return False
+            if "heartbeat_every_bars" in params and int(params.get("heartbeat_every_bars", 0)) < 0:
+                return False
+            if "heartbeat_notional_usd" in params and float(params.get("heartbeat_notional_usd", 0.0)) < 0:
+                return False
+            if ("market_drawdown_reduce" in params) or ("market_drawdown_off" in params):
+                md_reduce = float(params.get("market_drawdown_reduce", 0.0) or 0.0)
+                md_off = float(params.get("market_drawdown_off", 0.0) or 0.0)
+                if not (0.0 < md_reduce < md_off < 1.0):
+                    return False
+            if ("market_vol_reduce_bps" in params) or ("market_vol_off_bps" in params):
+                vol_reduce = float(params.get("market_vol_reduce_bps", 0.0) or 0.0)
+                vol_off = float(params.get("market_vol_off_bps", 0.0) or 0.0)
+                if not (0.0 < vol_reduce < vol_off):
+                    return False
+            if "market_peak_halflife_bars" in params and int(params.get("market_peak_halflife_bars", 0)) <= 0:
+                return False
+            if ("w_mom_short" in params) or ("w_mom_med" in params) or ("w_mom_long" in params):
+                w_s = float(params.get("w_mom_short", 0.0) or 0.0)
+                w_m = float(params.get("w_mom_med", 0.0) or 0.0)
+                w_l = float(params.get("w_mom_long", 0.0) or 0.0)
+                if w_s < 0 or w_m < 0 or w_l < 0:
+                    return False
+                if (w_s + w_m + w_l) <= 0:
+                    return False
+            return True
+        except Exception:
+            return False
+    if strategy == "crypto_momentum":
+        try:
+            if int(params.get("momentum_window_bars", 0)) < 2:
+                return False
+            if float(params.get("max_total_exposure", 0.0)) <= 0:
+                return False
+            if float(params.get("max_exposure_per_symbol", 0.0)) <= 0:
+                return False
+            if float(params.get("max_exposure_per_symbol", 0.0)) < (
+                float(params.get("max_total_exposure", 0.0)) / 8.0
+            ):
+                return False
+            if int(params.get("rebalance_interval_bars", 0)) <= 0:
+                return False
+            if float(params.get("rebalance_exposure_threshold", 0.0)) < 0:
+                return False
+            if float(params.get("min_trade_notional_usd", 0.0)) < 0:
+                return False
+            if int(params.get("heartbeat_every_bars", 0)) < 0:
+                return False
+            if float(params.get("heartbeat_notional_usd", 0.0)) < 0:
+                return False
+            return True
+        except Exception:
+            return False
+    if strategy == "crypto_regime_vol_target":
+        try:
+            if int(params.get("fast_window", 0)) >= int(params.get("slow_window", 0)):
+                return False
+            if int(params.get("regime_window", 0)) < int(params.get("slow_window", 0)):
+                return False
+            if int(params.get("regime_slope_bars", 0)) < 1:
+                return False
+            if int(params.get("momentum_window_bars", 0)) < 2:
+                return False
+            if int(params.get("atr_window", 0)) < 2:
+                return False
+            if int(params.get("top_k", 0)) <= 0:
+                return False
+            if float(params.get("target_vol_bps_per_bar", 0.0)) < 0:
+                return False
+            if float(params.get("max_total_exposure", 0.0)) <= 0:
+                return False
+            if float(params.get("max_exposure_per_symbol", 0.0)) <= 0:
+                return False
+            if float(params.get("max_exposure_per_symbol", 0.0)) > float(
+                params.get("max_total_exposure", 0.0)
+            ):
+                return False
+            if int(params.get("rebalance_interval_bars", 0)) <= 0:
+                return False
+            if float(params.get("rebalance_exposure_threshold", 0.0)) < 0:
+                return False
+            if float(params.get("market_drawdown_reduce", 0.0)) <= 0:
+                return False
+            if float(params.get("market_drawdown_off", 0.0)) <= 0:
+                return False
+            if float(params.get("market_drawdown_reduce", 0.0)) >= float(
+                params.get("market_drawdown_off", 0.0)
+            ):
+                return False
+            if int(params.get("market_peak_lookback_bars", 0)) < 2:
+                return False
+            if float(params.get("weekly_loss_limit", 0.0)) <= 0:
+                return False
+            if float(params.get("weekly_profit_target", 0.0)) <= 0:
+                return False
+            if float(params.get("daily_loss_limit", 0.0)) <= 0:
+                return False
+            if float(params.get("kill_switch", 0.0)) <= float(
+                params.get("daily_loss_limit", 0.0)
+            ):
+                return False
+            if int(params.get("kill_switch_cooldown_days", 0)) < 0:
+                return False
+            if float(params.get("trailing_stop_pct", 0.0)) < 0:
+                return False
+            if int(params.get("min_hold_bars", 0)) < 0:
+                return False
+            return True
+        except Exception:
+            return False
+    if strategy == "crypto_regime_fusion":
+        try:
+            if int(params.get("regime_ema_fast", 0)) >= int(params.get("regime_ema_slow", 0)):
+                return False
+            if int(params.get("regime_momentum_bars", 0)) <= 1:
+                return False
+            if int(params.get("regime_er_bars", 0)) <= 1:
+                return False
+            if not (0.0 < float(params.get("regime_trend_er_min", 0.0)) <= 1.0):
+                return False
+            if not (0.0 < float(params.get("regime_range_er_max", 0.0)) < 1.0):
+                return False
+            if float(params.get("regime_range_er_max", 0.0)) >= float(
+                params.get("regime_trend_er_min", 0.0)
+            ):
+                return False
+            if float(params.get("max_total_exposure", 0.0)) <= 0:
+                return False
+            if float(params.get("max_exposure_per_symbol", 0.0)) <= 0:
+                return False
+            if int(params.get("trend_top_k", 0)) <= 0:
+                return False
+            if int(params.get("momentum_window_bars", 0)) <= 1:
+                return False
+            if int(params.get("vol_window_bars", 0)) <= 1:
+                return False
+            if int(params.get("meanrev_window_bars", 0)) <= 1:
+                return False
+            if float(params.get("meanrev_entry_z", 0.0)) <= 0:
+                return False
+            if float(params.get("meanrev_exit_z", 0.0)) < 0:
+                return False
+            if float(params.get("meanrev_exit_z", 0.0)) >= float(
+                params.get("meanrev_entry_z", 0.0)
+            ):
+                return False
+            if float(params.get("range_min_exposure", 0.0)) < 0:
+                return False
+            if float(params.get("range_max_exposure", 0.0)) < 0:
+                return False
+            if float(params.get("range_min_exposure", 0.0)) > float(
+                params.get("range_max_exposure", 0.0)
+            ):
+                return False
+            if int(params.get("rebalance_interval_bars", 0)) <= 0:
+                return False
+            if float(params.get("rebalance_exposure_threshold", 0.0)) < 0:
+                return False
+            if float(params.get("daily_loss_limit", 0.0)) <= 0:
+                return False
+            if float(params.get("kill_switch", 0.0)) <= 0:
+                return False
+            if float(params.get("kill_switch", 0.0)) <= float(
+                params.get("daily_loss_limit", 0.0)
+            ):
+                return False
+            if int(params.get("kill_switch_cooldown_days", 0)) < 0:
+                return False
+            if int(params.get("heartbeat_every_bars", 0)) < 0:
+                return False
+            if float(params.get("heartbeat_notional_usd", 0.0)) < 0:
+                return False
+            if float(params.get("heartbeat_max_exposure_delta", 0.0)) < 0:
+                return False
+            return True
+        except Exception:
+            return False
+    if strategy == "crypto_vol_squeeze":
+        try:
+            if int(params.get("bb_window", 0)) < 2:
+                return False
+            if float(params.get("bb_k", 0.0)) <= 0:
+                return False
+            if int(params.get("squeeze_lookback", 0)) < int(params.get("bb_window", 0)):
+                return False
+            sq = float(params.get("squeeze_percentile", 0.0))
+            if not (0.0 < sq < 1.0):
+                return False
+            if int(params.get("donchian_window", 0)) < 2:
+                return False
+            if int(params.get("atr_window", 0)) < 2:
+                return False
+            if float(params.get("min_atr_bps", 0.0)) < 0:
+                return False
+            if float(params.get("entry_breakout_buffer_bps", 0.0)) < 0:
+                return False
+            if float(params.get("expected_move_atr_mult", 0.0)) <= 0:
+                return False
+            if float(params.get("cost_k", 0.0)) < 0:
+                return False
+            if float(params.get("edge_floor_bps", 0.0)) < 0:
+                return False
+            if float(params.get("max_total_exposure", 0.0)) <= 0:
+                return False
+            if float(params.get("max_exposure_per_symbol", 0.0)) <= 0:
+                return False
+            if float(params.get("max_exposure_per_symbol", 0.0)) > float(
+                params.get("max_total_exposure", 0.0)
+            ):
+                return False
+            if float(params.get("vol_target_bps_per_bar", 0.0)) < 0:
+                return False
+            if int(params.get("rebalance_interval_bars", 0)) <= 0:
+                return False
+            if float(params.get("rebalance_exposure_threshold", 0.0)) < 0:
+                return False
+            if int(params.get("min_hold_bars", 0)) < 1:
+                return False
+            if int(params.get("max_hold_bars", 0)) < int(params.get("min_hold_bars", 0)):
+                return False
+            if int(params.get("exit_mom_bars", 0)) < 1:
+                return False
+            if float(params.get("daily_loss_limit", 0.0)) <= 0:
+                return False
+            if float(params.get("kill_switch", 0.0)) <= 0:
+                return False
+            if float(params.get("kill_switch", 0.0)) <= float(
+                params.get("daily_loss_limit", 0.0)
+            ):
+                return False
+            md_reduce = float(params.get("market_drawdown_reduce", 0.0) or 0.0)
+            md_off = float(params.get("market_drawdown_off", 0.0) or 0.0)
+            if not (0.0 < md_reduce < md_off < 1.0):
+                return False
+            vol_reduce = float(params.get("market_vol_reduce_bps", 0.0) or 0.0)
+            vol_off = float(params.get("market_vol_off_bps", 0.0) or 0.0)
+            if not (0.0 < vol_reduce < vol_off):
+                return False
+            if int(params.get("kill_switch_cooldown_days", 0)) < 0:
+                return False
+            return True
+        except Exception:
+            return False
+    if strategy == "crypto_weekly_lock_momentum":
+        try:
+            m1 = int(params.get("mom_short_bars", 0))
+            m2 = int(params.get("mom_med_bars", 0))
+            m3 = int(params.get("mom_long_bars", 0))
+            if not (0 < m1 < m2 < m3):
+                return False
+            w1 = float(params.get("w_mom_short", 0.0))
+            w2 = float(params.get("w_mom_med", 0.0))
+            w3 = float(params.get("w_mom_long", 0.0))
+            if w1 < 0 or w2 < 0 or w3 < 0:
+                return False
+            if (w1 + w2 + w3) <= 0:
+                return False
+            if int(params.get("vol_window_bars", 0)) < 2:
+                return False
+            if int(params.get("top_k", 0)) <= 0:
+                return False
+            if float(params.get("max_total_exposure", 0.0)) <= 0:
+                return False
+            if float(params.get("max_exposure_per_symbol", 0.0)) <= 0:
+                return False
+            if float(params.get("max_exposure_per_symbol", 0.0)) > float(
+                params.get("max_total_exposure", 0.0)
+            ):
+                return False
+            if float(params.get("vol_target_bps_per_bar", 0.0)) < 0:
+                return False
+            if int(params.get("rebalance_interval_bars", 0)) <= 0:
+                return False
+            if float(params.get("rebalance_exposure_threshold", 0.0)) < 0:
+                return False
+            if int(params.get("regime_ema_bars", 0)) < 2:
+                return False
+            if int(params.get("regime_mom_bars", 0)) < 2:
+                return False
+            if int(params.get("regime_peak_lookback_bars", 0)) < 2:
+                return False
+            dd_reduce = float(params.get("regime_dd_reduce", 0.0))
+            dd_off = float(params.get("regime_dd_off", 0.0))
+            if not (0.0 < dd_reduce < dd_off < 1.0):
+                return False
+            if float(params.get("weekly_profit_target", 0.0)) <= 0:
+                return False
+            if float(params.get("weekly_loss_limit", 0.0)) <= 0:
+                return False
+            if float(params.get("daily_loss_limit", 0.0)) <= 0:
+                return False
+            if float(params.get("kill_switch", 0.0)) <= 0:
+                return False
+            if float(params.get("kill_switch", 0.0)) <= float(
+                params.get("daily_loss_limit", 0.0)
+            ):
+                return False
+            if int(params.get("kill_switch_cooldown_days", 0)) < 0:
+                return False
+            return True
+        except Exception:
+            return False
+    if strategy == "perp_quant_fusion":
+        try:
+            if int(params.get("ema_fast", 0)) >= int(params.get("ema_slow", 0)):
+                return False
+            if int(params.get("atr_window", 0)) < 2:
+                return False
+            if int(params.get("er_window", 0)) < 2:
+                return False
+            if int(params.get("choppiness_window", 0)) < 2:
+                return False
+            if int(params.get("breakout_window", 0)) < 2:
+                return False
+            if float(params.get("breakout_buffer_bps", 0.0)) < 0:
+                return False
+            if float(params.get("trend_z_min", 0.0)) < 0:
+                return False
+            if not (0.0 < float(params.get("er_min", 0.0)) <= 1.0):
+                return False
+            if not (0.0 <= float(params.get("er_exit_min", 0.0)) < 1.0):
+                return False
+            if float(params.get("er_exit_min", 0.0)) >= float(params.get("er_min", 0.0)):
+                return False
+            if float(params.get("choppiness_exit_max", 0.0)) < float(
+                params.get("choppiness_max", 0.0)
+            ):
+                return False
+            if float(params.get("edge_floor_bps", 0.0)) < 0:
+                return False
+            if float(params.get("k_cost", 0.0)) < 0:
+                return False
+            if float(params.get("risk_budget", 0.0)) <= 0:
+                return False
+            if float(params.get("stop_atr_mult", 0.0)) <= 0:
+                return False
+            if ("max_margin_utilization" in params) and not (
+                0.0 < float(params.get("max_margin_utilization", 0.0)) <= 1.0
+            ):
+                return False
+            if ("max_leverage" in params) and float(params.get("max_leverage", 0.0)) <= 0:
+                return False
+            if int(params.get("max_positions", 0)) <= 0:
+                return False
+            if float(params.get("max_gross_exposure", 0.0)) <= 0:
+                return False
+            if float(params.get("max_per_symbol_exposure", 0.0)) <= 0:
+                return False
+            if float(params.get("max_per_symbol_exposure", 0.0)) > float(
+                params.get("max_gross_exposure", 0.0)
+            ):
+                return False
+            if float(params.get("rebalance_exposure_threshold", 0.0)) < 0:
+                return False
+            if int(params.get("min_hold_bars", 0)) < 1:
+                return False
+            if int(params.get("flip_confirm_bars", 0)) < 1:
+                return False
+            if float(params.get("daily_loss_limit", 0.0)) <= 0:
+                return False
+            if float(params.get("kill_switch", 0.0)) <= 0:
+                return False
+            if float(params.get("kill_switch", 0.0)) <= float(
+                params.get("daily_loss_limit", 0.0)
+            ):
+                return False
+            if float(params.get("weekly_profit_target", 0.0)) <= 0:
+                return False
+            if not (0.0 <= float(params.get("weekly_lock_risk_scale", 0.0)) <= 1.0):
+                return False
+            if float(params.get("heartbeat_exposure", 0.0)) < 0:
+                return False
+            if int(params.get("heartbeat_hold_bars", 0)) < 1:
+                return False
+            return True
+        except Exception:
+            return False
+    if strategy == "perp_trend_vol_guard":
+        try:
+            if int(params.get("ema_fast", 0)) >= int(params.get("ema_slow", 0)):
+                return False
+            if int(params.get("momentum_window_bars", 0)) < 2:
+                return False
+            if int(params.get("breakout_window", 0)) < 2:
+                return False
+            if int(params.get("atr_window", 0)) < 2:
+                return False
+            if float(params.get("breakout_buffer_bps", 0.0)) < 0:
+                return False
+            if float(params.get("trend_strength_min", 0.0)) < 0:
+                return False
+            if float(params.get("min_atr_bps", 0.0)) < 0:
+                return False
+            if float(params.get("edge_floor_bps", 0.0)) < 0:
+                return False
+            if float(params.get("k_cost", 0.0)) < 0:
+                return False
+            if float(params.get("risk_budget", 0.0)) <= 0:
+                return False
+            if float(params.get("stop_atr_mult", 0.0)) <= 0:
+                return False
+            if float(params.get("target_vol_bps_per_bar", 0.0)) < 0:
+                return False
+            if int(params.get("max_positions", 0)) <= 0:
+                return False
+            if float(params.get("max_gross_exposure", 0.0)) <= 0:
+                return False
+            if float(params.get("max_per_symbol_exposure", 0.0)) <= 0:
+                return False
+            if float(params.get("max_per_symbol_exposure", 0.0)) > float(
+                params.get("max_gross_exposure", 0.0)
+            ):
+                return False
+            if int(params.get("rebalance_interval_bars", 0)) <= 0:
+                return False
+            if float(params.get("rebalance_exposure_threshold", 0.0)) < 0:
+                return False
+            if int(params.get("min_hold_bars", 0)) < 1:
+                return False
+            if int(params.get("flip_confirm_bars", 0)) < 1:
+                return False
+            if float(params.get("market_vol_reduce_bps", 0.0)) <= 0:
+                return False
+            if float(params.get("market_vol_off_bps", 0.0)) <= float(
+                params.get("market_vol_reduce_bps", 0.0)
+            ):
+                return False
+            if float(params.get("weekly_loss_limit", 0.0)) <= 0:
+                return False
+            if float(params.get("weekly_profit_target", 0.0)) <= 0:
+                return False
+            if not (0.0 <= float(params.get("weekly_lock_risk_scale", 0.0)) <= 1.0):
+                return False
+            if float(params.get("daily_loss_limit", 0.0)) <= 0:
+                return False
+            if float(params.get("kill_switch", 0.0)) <= float(
+                params.get("daily_loss_limit", 0.0)
+            ):
+                return False
+            return True
+        except Exception:
+            return False
+    if strategy == "perp_weekly_carry_shield":
+        try:
+            if int(params.get("ema_fast", 0)) >= int(params.get("ema_slow", 0)):
+                return False
+            if int(params.get("atr_window", 0)) < 2:
+                return False
+            if int(params.get("er_window", 0)) < 2:
+                return False
+            if int(params.get("choppiness_window", 0)) < 2:
+                return False
+            if int(params.get("momentum_bars", 0)) < 2:
+                return False
+            if float(params.get("trend_z_min", 0.0)) < 0:
+                return False
+            if not (0.0 < float(params.get("er_min", 0.0)) <= 1.0):
+                return False
+            if float(params.get("choppiness_max", 0.0)) <= 0:
+                return False
+            if float(params.get("momentum_threshold_bps", 0.0)) < 0:
+                return False
+            if float(params.get("min_atr_bps", 0.0)) < 0:
+                return False
+            if float(params.get("edge_floor_bps", 0.0)) < 0:
+                return False
+            if float(params.get("k_cost", 0.0)) < 0:
+                return False
+            if float(params.get("expected_move_atr_mult", 0.0)) <= 0:
+                return False
+            if float(params.get("risk_budget", 0.0)) <= 0:
+                return False
+            if float(params.get("stop_atr_mult", 0.0)) <= 0:
+                return False
+            if int(params.get("max_positions", 0)) <= 0:
+                return False
+            if float(params.get("max_gross_exposure", 0.0)) <= 0:
+                return False
+            if float(params.get("max_per_symbol_exposure", 0.0)) <= 0:
+                return False
+            if float(params.get("max_per_symbol_exposure", 0.0)) > float(
+                params.get("max_gross_exposure", 0.0)
+            ):
+                return False
+            if int(params.get("min_hold_bars", 0)) < 1:
+                return False
+            if float(params.get("rebalance_exposure_threshold", 0.0)) < 0:
+                return False
+            if float(params.get("daily_loss_limit", 0.0)) <= 0:
+                return False
+            if float(params.get("kill_switch", 0.0)) <= 0:
+                return False
+            if float(params.get("kill_switch", 0.0)) <= float(
+                params.get("daily_loss_limit", 0.0)
+            ):
+                return False
+            if float(params.get("weekly_profit_target", 0.0)) <= 0:
+                return False
+            if float(params.get("weekly_loss_limit", 0.0)) <= 0:
+                return False
+            if float(params.get("weekly_heartbeat_exposure", 0.0)) < 0:
+                return False
+            if int(params.get("weekly_heartbeat_hold_bars", 0)) < 1:
+                return False
+            return True
+        except Exception:
+            return False
     return True
 
 
@@ -337,7 +1406,9 @@ class ObjectiveConfig:
 
     # Soft objective weights (maximize)
     w_total_return: float = 0.75
-    w_sharpe: float = 0.10
+    # Prefer daily Sharpe for comparability across timeframes.
+    w_sharpe_daily: float = 0.25
+    w_sharpe: float = 0.05
     w_positive_trading_days: float = 0.10
     w_drawdown: float = 1.00  # penalty on abs(max_drawdown)
     w_turnover: float = 0.003  # penalty on turnover
@@ -438,6 +1509,9 @@ def _evaluate_train_validate_trial(
             cfg=backtest_cfg,
             run_dir=train_dir,
             output_mode="minimal",
+            score_start=train_start,
+            score_end=train_end,
+            no_trade_before=train_start,
         )
         train_score = score_run(
             train_dir,
@@ -464,6 +1538,9 @@ def _evaluate_train_validate_trial(
             cfg=backtest_cfg,
             run_dir=validate_dir,
             output_mode="minimal",
+            score_start=validate_start,
+            score_end=validate_end,
+            no_trade_before=validate_start,
         )
         validate_score = score_run(
             validate_dir,
@@ -528,6 +1605,7 @@ class BacktestStats:
     total_return: float
     max_drawdown: float
     sharpe: float
+    sharpe_daily: float
     trades: int
     gross_notional: float
     turnover: float
@@ -605,11 +1683,13 @@ def _read_run_stats(
         total_return = float(metrics.total_return)
         max_drawdown = float(metrics.max_drawdown)
         sharpe = float(metrics.sharpe)
+        sharpe_daily = float(metrics.sharpe_daily)
         trade_count = int(metrics.trades)
     else:
         total_return = 0.0
         max_drawdown = 0.0
         sharpe = 0.0
+        sharpe_daily = 0.0
         trade_count = int(len(trades))
 
     avg_equity = float(equity["equity"].astype(float).mean()) if len(equity) else 0.0
@@ -643,6 +1723,7 @@ def _read_run_stats(
         total_return=float(total_return),
         max_drawdown=float(max_drawdown),
         sharpe=float(sharpe),
+        sharpe_daily=float(sharpe_daily),
         trades=int(trade_count),
         gross_notional=float(gross_notional),
         turnover=float(turnover),
@@ -712,6 +1793,7 @@ def score_run(
 
     breakdown = {
         "total_return": float(stats.total_return) * float(objective.w_total_return),
+        "sharpe_daily": float(stats.sharpe_daily) * float(objective.w_sharpe_daily),
         "sharpe": float(stats.sharpe) * float(objective.w_sharpe),
         "positive_trading_days": float(stats.positive_trading_day_frac)
         * float(objective.w_positive_trading_days),
@@ -834,6 +1916,9 @@ def _run_backtest_for_market(
     cfg: BacktestConfig,
     run_dir: Path,
     output_mode: str = "full",
+    score_start: Optional[datetime] = None,
+    score_end: Optional[datetime] = None,
+    no_trade_before: Optional[datetime] = None,
 ) -> BacktestOutputs:
     if market == Market.DERIVATIVES:
         return run_derivatives_backtest(
@@ -842,6 +1927,9 @@ def _run_backtest_for_market(
             cfg=cfg,
             run_dir=run_dir,
             output_mode=output_mode,
+            score_start=score_start,
+            score_end=score_end,
+            no_trade_before=no_trade_before,
         )
     return run_backtest(
         bars_by_symbol=bars_by_symbol,
@@ -849,6 +1937,9 @@ def _run_backtest_for_market(
         cfg=cfg,
         run_dir=run_dir,
         output_mode=output_mode,
+        score_start=score_start,
+        score_end=score_end,
+        no_trade_before=no_trade_before,
     )
 
 
@@ -1081,6 +2172,9 @@ def tune_walk_forward(
                         cfg=backtest_cfg,
                         run_dir=train_tmp,
                         output_mode="minimal",
+                        score_start=seg.train.start,
+                        score_end=seg.train.end,
+                        no_trade_before=seg.train.start,
                     )
                     train_scored = score_run(
                         train_tmp,
@@ -1107,6 +2201,9 @@ def tune_walk_forward(
                         cfg=backtest_cfg,
                         run_dir=val_tmp,
                         output_mode="minimal",
+                        score_start=seg.validate.start,
+                        score_end=seg.validate.end,
+                        no_trade_before=seg.validate.start,
                     )
                     val_scored = score_run(
                         val_tmp,
@@ -1156,6 +2253,9 @@ def tune_walk_forward(
                             cfg=backtest_cfg,
                             run_dir=train_tmp,
                             output_mode="minimal",
+                            score_start=seg.train.start,
+                            score_end=seg.train.end,
+                            no_trade_before=seg.train.start,
                         )
                         train_score = score_run(
                             train_tmp,
@@ -1182,6 +2282,9 @@ def tune_walk_forward(
                             cfg=backtest_cfg,
                             run_dir=val_tmp,
                             output_mode="minimal",
+                            score_start=seg.validate.start,
+                            score_end=seg.validate.end,
+                            no_trade_before=seg.validate.start,
                         )
                         val_score = score_run(
                             val_tmp,
@@ -1414,6 +2517,9 @@ def tune_walk_forward(
                     ),
                     cfg=backtest_cfg,
                     run_dir=test_run_dir,
+                    score_start=seg.test.start,
+                    score_end=seg.test.end,
+                    no_trade_before=seg.test.start,
                 )
                 test_score = score_run(
                     test_run_dir,

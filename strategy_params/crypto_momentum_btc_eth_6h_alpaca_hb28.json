@@ -1,0 +1,13 @@
+{
+  "crypto_momentum": {
+    "market_symbol": "BTC/USD",
+    "momentum_window_bars": 240,
+    "max_total_exposure": 1.0,
+    "max_exposure_per_symbol": 1.0,
+    "rebalance_interval_bars": 28,
+    "rebalance_exposure_threshold": 0.10,
+    "min_trade_notional_usd": 25.0,
+    "heartbeat_every_bars": 28,
+    "heartbeat_notional_usd": 1.0
+  }
+}
