@@ -1,0 +1,31 @@
+{
+  "perp_trend_vol_guard": {
+    "ema_fast": 10,
+    "ema_slow": 109,
+    "momentum_window_bars": 10,
+    "breakout_window": 13,
+    "breakout_buffer_bps": 10.1118375,
+    "atr_window": 8,
+    "trend_strength_min": 0.712,
+    "min_atr_bps": 6.367,
+    "edge_floor_bps": 7.593600000000001,
+    "k_cost": 3.662,
+    "risk_budget": 0.007036,
+    "stop_atr_mult": 5.226,
+    "target_vol_bps_per_bar": 57.893,
+    "max_positions": 1,
+    "max_gross_exposure": 0.5834,
+    "max_per_symbol_exposure": 0.1785,
+    "rebalance_interval_bars": 4,
+    "rebalance_exposure_threshold": 0.0481,
+    "min_hold_bars": 6,
+    "flip_confirm_bars": 5,
+    "market_vol_reduce_bps": 43.39350000000001,
+    "market_vol_off_bps": 213.32640000000004,
+    "weekly_loss_limit": 0.045360000000000004,
+    "weekly_profit_target": 0.0174,
+    "weekly_lock_risk_scale": 0.13264,
+    "daily_loss_limit": 0.0363,
+    "kill_switch": 0.15936
+  }
+}

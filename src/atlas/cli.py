@@ -19,6 +19,7 @@ from atlas.backtest.plots import write_equity_vs_benchmark_artifacts
 from atlas.backtest.window_analysis import rolling_window_summary, write_window_analysis_json
 from atlas.backtest.derivatives_engine import run_derivatives_backtest
 from atlas.config import (
+    AlpacaSettings,
     get_alpaca_settings,
     get_default_max_position_notional_usd,
     get_log_level,
@@ -126,6 +127,8 @@ def _print_backtest_summary(
             f"max_notional={cfg.max_position_notional_usd:.2f} "
             f"slippage_bps={cfg.slippage_bps:.2f} "
             f"taker_fee_bps={cfg.taker_fee_bps:.2f} "
+            f"fixed_fee_per_contract_usd={cfg.fixed_fee_per_contract_usd:.4f} "
+            f"contract_size_units={cfg.contract_size_units:.6g} "
             f"allow_short={cfg.allow_short}"
         )
         typer.echo(
@@ -168,6 +171,8 @@ def _print_backtest_summary(
                 f"max_notional={cfg.max_position_notional_usd:.2f}",
                 f"slippage_bps={cfg.slippage_bps:.2f}",
                 f"taker_fee_bps={cfg.taker_fee_bps:.2f}",
+                f"fixed_fee_per_contract_usd={cfg.fixed_fee_per_contract_usd:.4f}",
+                f"contract_size_units={cfg.contract_size_units:.6g}",
                 f"allow_short={cfg.allow_short}",
             ]
         ),
@@ -311,7 +316,26 @@ def backtest(
     ),
     taker_fee_bps: Optional[float] = typer.Option(
         None,
-        help="Taker fee in bps (per side). If omitted: equity=0.0, crypto=25.0, derivatives=3.0.",
+        help="Taker fee in bps (per side). If omitted: equity=0.0, crypto=25.0, derivatives=10.0 on coinbase (otherwise 3.0).",
+    ),
+    fixed_fee_per_contract_usd: Optional[float] = typer.Option(
+        None,
+        help=(
+            "Derivatives only: fixed fee in USD charged per contract per side. "
+            "If omitted with market=derivatives and data-source=coinbase: defaults to 0.15."
+        ),
+    ),
+    contract_size_units: Optional[float] = typer.Option(
+        None,
+        help=(
+            "Derivatives only: contract size in underlying units (e.g. BTC nano perp = 0.01 BTC). "
+            "If omitted with market=derivatives and data-source=coinbase: defaults to 0.01."
+        ),
+    ),
+    coinbase_fee_model: bool = typer.Option(
+        True,
+        "--coinbase-fee-model/--no-coinbase-fee-model",
+        help="Apply Coinbase fixed per-contract fee model (only active for market=derivatives + data-source=coinbase).",
     ),
     maintenance_margin_rate: float = typer.Option(
         0.05,
@@ -402,7 +426,29 @@ def backtest(
     if mkt == Market.CRYPTO:
         default_taker_fee_bps = 25.0
     elif mkt == Market.DERIVATIVES:
-        default_taker_fee_bps = 3.0
+        default_taker_fee_bps = 10.0 if str(data_source).strip().lower() == "coinbase" else 3.0
+
+    use_coinbase_fee_model = bool(
+        coinbase_fee_model and mkt == Market.DERIVATIVES and str(data_source).strip().lower() == "coinbase"
+    )
+    default_fixed_fee_per_contract_usd = 0.0
+    default_contract_size_units = 1.0
+    if use_coinbase_fee_model:
+        default_fixed_fee_per_contract_usd = 0.15
+        default_contract_size_units = 0.01
+    effective_fixed_fee_per_contract_usd = (
+        float(default_fixed_fee_per_contract_usd)
+        if fixed_fee_per_contract_usd is None
+        else float(fixed_fee_per_contract_usd)
+    )
+    effective_contract_size_units = (
+        float(default_contract_size_units) if contract_size_units is None else float(contract_size_units)
+    )
+    if not use_coinbase_fee_model:
+        effective_fixed_fee_per_contract_usd = 0.0
+        effective_contract_size_units = 1.0
+    if effective_contract_size_units <= 0.0:
+        effective_contract_size_units = 1.0
 
     cfg = BacktestConfig(
         symbols=universe_symbols,
@@ -421,6 +467,8 @@ def backtest(
         ),
         allow_short=allow_short,
         taker_fee_bps=float(default_taker_fee_bps if taker_fee_bps is None else taker_fee_bps),
+        fixed_fee_per_contract_usd=float(effective_fixed_fee_per_contract_usd),
+        contract_size_units=float(effective_contract_size_units),
         maintenance_margin_rate=float(maintenance_margin_rate),
         liquidation_fee_rate=float(liquidation_fee_rate),
     )
@@ -566,7 +614,26 @@ def tune(
     ),
     taker_fee_bps: Optional[float] = typer.Option(
         None,
-        help="Taker fee in bps (per side). If omitted: equity=0.0, crypto=25.0, derivatives=3.0.",
+        help="Taker fee in bps (per side). If omitted: equity=0.0, crypto=25.0, derivatives=10.0 on coinbase (otherwise 3.0).",
+    ),
+    fixed_fee_per_contract_usd: Optional[float] = typer.Option(
+        None,
+        help=(
+            "Derivatives only: fixed fee in USD charged per contract per side. "
+            "If omitted with market=derivatives and data-source=coinbase: defaults to 0.15."
+        ),
+    ),
+    contract_size_units: Optional[float] = typer.Option(
+        None,
+        help=(
+            "Derivatives only: contract size in underlying units (e.g. BTC nano perp = 0.01 BTC). "
+            "If omitted with market=derivatives and data-source=coinbase: defaults to 0.01."
+        ),
+    ),
+    coinbase_fee_model: bool = typer.Option(
+        True,
+        "--coinbase-fee-model/--no-coinbase-fee-model",
+        help="Apply Coinbase fixed per-contract fee model (only active for market=derivatives + data-source=coinbase).",
     ),
     allow_short: bool = typer.Option(True, help="Allow negative exposure"),
     trials_per_segment: int = typer.Option(60, help="Random trials per walk-forward segment"),
@@ -646,9 +713,31 @@ def tune(
 
     default_taker_fee_bps = 0.0
     if mkt == Market.DERIVATIVES:
-        default_taker_fee_bps = 3.0
+        default_taker_fee_bps = 10.0 if str(data_source).strip().lower() == "coinbase" else 3.0
     elif mkt == Market.CRYPTO:
         default_taker_fee_bps = 25.0
+
+    use_coinbase_fee_model = bool(
+        coinbase_fee_model and mkt == Market.DERIVATIVES and str(data_source).strip().lower() == "coinbase"
+    )
+    default_fixed_fee_per_contract_usd = 0.0
+    default_contract_size_units = 1.0
+    if use_coinbase_fee_model:
+        default_fixed_fee_per_contract_usd = 0.15
+        default_contract_size_units = 0.01
+    effective_fixed_fee_per_contract_usd = (
+        float(default_fixed_fee_per_contract_usd)
+        if fixed_fee_per_contract_usd is None
+        else float(fixed_fee_per_contract_usd)
+    )
+    effective_contract_size_units = (
+        float(default_contract_size_units) if contract_size_units is None else float(contract_size_units)
+    )
+    if not use_coinbase_fee_model:
+        effective_fixed_fee_per_contract_usd = 0.0
+        effective_contract_size_units = 1.0
+    if effective_contract_size_units <= 0.0:
+        effective_contract_size_units = 1.0
 
     backtest_cfg = BacktestConfig(
         symbols=universe_symbols,
@@ -657,6 +746,8 @@ def tune(
         slippage_bps=float(default_slippage_bps if slippage_bps is None else slippage_bps),
         allow_short=bool(allow_short),
         taker_fee_bps=float(default_taker_fee_bps if taker_fee_bps is None else taker_fee_bps),
+        fixed_fee_per_contract_usd=float(effective_fixed_fee_per_contract_usd),
+        contract_size_units=float(effective_contract_size_units),
     )
 
     optimize = (optimize or "").strip().lower()
@@ -1058,6 +1149,19 @@ def evaluate_all(
     baseline_taker_fee_bps: float = typer.Option(
         25.0, help="Baseline taker fee bps per side for initial ranking"
     ),
+    coinbase_fee_model: bool = typer.Option(
+        True,
+        "--coinbase-fee-model/--no-coinbase-fee-model",
+        help="Enable Coinbase fixed per-contract fee model for derivatives candidates that use coinbase data.",
+    ),
+    coinbase_fixed_fee_per_contract_usd: float = typer.Option(
+        0.15,
+        help="Coinbase fixed fee in USD per contract per side (used when coinbase fee model is enabled).",
+    ),
+    coinbase_contract_size_units: float = typer.Option(
+        0.01,
+        help="Coinbase contract size in underlying units (e.g. nano BTC perp = 0.01 BTC).",
+    ),
     stress_slippage_grid: str = typer.Option(
         "3,5,8", help="Stress grid slippage bps values, comma-separated"
     ),
@@ -1152,6 +1256,9 @@ def evaluate_all(
         prewarm=str(prewarm),
         baseline_slippage_bps=float(baseline_slippage_bps),
         baseline_taker_fee_bps=float(baseline_taker_fee_bps),
+        use_coinbase_fee_model=bool(coinbase_fee_model),
+        coinbase_fixed_fee_per_contract_usd=float(coinbase_fixed_fee_per_contract_usd),
+        coinbase_contract_size_units=float(coinbase_contract_size_units),
         stress_slippage_grid=tuple(float(v) for v in slip_grid),
         stress_taker_fee_grid=tuple(float(v) for v in fee_grid),
         stress_min_mean_return=float(stress_min_mean_return),
@@ -1209,6 +1316,16 @@ def paper(
     bar_timeframe: str = typer.Option(
         "1Min", help="Bar timeframe, e.g. 1Min, 5Min, 15Min, 30Min, 1H, 4H, 6H, 1D"
     ),
+    data_source: str = typer.Option(
+        "alpaca",
+        help="Bars source for paper loop: alpaca|coinbase",
+        show_default=True,
+    ),
+    execution_venue: str = typer.Option(
+        "alpaca",
+        help="Order execution venue: alpaca|coinbase",
+        show_default=True,
+    ),
     alpaca_feed: str = typer.Option(
         "iex",
         help="Alpaca data feed for bars: iex, sip, delayed_sip (alias: uses sip but clamps end >=15m old).",
@@ -1221,6 +1338,10 @@ def paper(
     slow_window: int = typer.Option(30, help="ma_crossover/ema_crossover slow window"),
     lookback_bars: int = typer.Option(200, help="Bars fetched each loop"),
     poll_seconds: int = typer.Option(60, help="Minimum seconds between loops"),
+    initial_cash: float = typer.Option(
+        500.0,
+        help="Synthetic starting cash for paper risk accounting (used for coinbase execution state).",
+    ),
     max_position_notional_usd: Optional[float] = typer.Option(
         None, help="Max notional per symbol"
     ),
@@ -1230,7 +1351,26 @@ def paper(
     ),
     taker_fee_bps: Optional[float] = typer.Option(
         None,
-        help="Taker fee proxy per side in bps (used for strategy cost gating only). If omitted: equity=0.0, crypto=25.0, derivatives=3.0.",
+        help="Taker fee proxy per side in bps (used for strategy cost gating only). If omitted: equity=0.0, crypto=25.0, derivatives=10.0 on coinbase (otherwise 3.0).",
+    ),
+    fixed_fee_per_contract_usd: Optional[float] = typer.Option(
+        None,
+        help=(
+            "Derivatives/coinbase: fixed fee in USD per contract per side for synthetic PnL accounting. "
+            "If omitted with market=derivatives and coinbase venue/source: defaults to 0.15."
+        ),
+    ),
+    contract_size_units: Optional[float] = typer.Option(
+        None,
+        help=(
+            "Derivatives/coinbase: contract size in underlying units (e.g. BTC nano perp = 0.01 BTC). "
+            "If omitted with market=derivatives and coinbase venue/source: defaults to 0.01."
+        ),
+    ),
+    coinbase_fee_model: bool = typer.Option(
+        True,
+        "--coinbase-fee-model/--no-coinbase-fee-model",
+        help="Apply Coinbase fixed per-contract fee model (only active for derivatives + coinbase venue/source).",
     ),
     allow_short: bool = typer.Option(False, help="Allow negative target exposure (shorting)"),
     regular_hours_only: bool = typer.Option(
@@ -1243,10 +1383,13 @@ def paper(
         5.0,
         help="When market is closed, price limit orders at ±offset bps from last price to improve fill odds.",
     ),
-    dry_run: bool = typer.Option(False, help="Do not submit orders"),
+    dry_run: Optional[bool] = typer.Option(
+        None,
+        "--dry-run/--no-dry-run",
+        help="If omitted: defaults to false for alpaca venue and true for coinbase venue.",
+    ),
     max_loops: Optional[int] = typer.Option(None, help="Stop after N loops"),
 ) -> None:
-    settings = get_alpaca_settings(require_keys=True)
     run_dir = Path("outputs") / "paper" / _run_id("paper")
     setup_logging(level=get_log_level(), log_file=run_dir / "run.log")
 
@@ -1254,6 +1397,28 @@ def paper(
         max_position_notional_usd = get_default_max_position_notional_usd(mode="paper")
 
     mkt = parse_market(market)
+    data_source = str(data_source).strip().lower()
+    if data_source not in {"alpaca", "coinbase"}:
+        raise typer.BadParameter("data_source must be one of: alpaca|coinbase")
+    execution_venue = str(execution_venue).strip().lower()
+    if execution_venue not in {"alpaca", "coinbase"}:
+        raise typer.BadParameter("execution_venue must be one of: alpaca|coinbase")
+
+    if mkt == Market.DERIVATIVES and data_source != "coinbase":
+        raise typer.BadParameter("market=derivatives requires --data-source coinbase")
+    if mkt == Market.DERIVATIVES and execution_venue != "coinbase":
+        raise typer.BadParameter("market=derivatives requires --execution-venue coinbase")
+    if execution_venue == "coinbase" and mkt == Market.EQUITY:
+        raise typer.BadParameter("execution-venue=coinbase supports crypto|derivatives only")
+    if execution_venue == "coinbase" and data_source != "coinbase":
+        raise typer.BadParameter("execution-venue=coinbase currently requires --data-source coinbase")
+
+    effective_dry_run = (execution_venue == "coinbase") if dry_run is None else bool(dry_run)
+
+    settings: Optional[AlpacaSettings] = None
+    if data_source == "alpaca" or execution_venue == "alpaca":
+        settings = get_alpaca_settings(require_keys=True)
+
     canonical_strategy = str(strategy).strip().lower().replace("-", "_")
     if canonical_strategy in {"nec_x", "nec_pdt"} and len(symbols) < 2:
         symbols = default_symbols(mkt, count=2)
@@ -1266,13 +1431,53 @@ def paper(
         fast_window=fast_window,
         slow_window=slow_window,
     )
+    warmup_bars = int(max(1, int(strat.warmup_bars())))
+    effective_lookback_bars = int(lookback_bars)
+    recommended_paper_lookback = int(warmup_bars)
+    if canonical_strategy == "perp_regime_adaptive_trend_capture":
+        # RATC uses long horizons; keep extra bars beyond minimum warmup.
+        recommended_paper_lookback = max(recommended_paper_lookback, 1000)
+    if effective_lookback_bars < recommended_paper_lookback:
+        typer.echo(
+            f"paper lookback auto-raised {effective_lookback_bars} -> {recommended_paper_lookback} "
+            f"(strategy warmup_bars={warmup_bars})"
+        )
+        effective_lookback_bars = int(recommended_paper_lookback)
+
+    use_coinbase_fee_model = bool(
+        coinbase_fee_model
+        and mkt == Market.DERIVATIVES
+        and str(data_source).strip().lower() == "coinbase"
+        and str(execution_venue).strip().lower() == "coinbase"
+    )
+    default_fixed_fee_per_contract_usd = 0.0
+    default_contract_size_units = 1.0
+    if use_coinbase_fee_model:
+        default_fixed_fee_per_contract_usd = 0.15
+        default_contract_size_units = 0.01
+    effective_fixed_fee_per_contract_usd = (
+        float(default_fixed_fee_per_contract_usd)
+        if fixed_fee_per_contract_usd is None
+        else float(fixed_fee_per_contract_usd)
+    )
+    effective_contract_size_units = (
+        float(default_contract_size_units) if contract_size_units is None else float(contract_size_units)
+    )
+    if not use_coinbase_fee_model:
+        effective_fixed_fee_per_contract_usd = 0.0
+        effective_contract_size_units = 1.0
+    if effective_contract_size_units <= 0.0:
+        effective_contract_size_units = 1.0
 
     cfg = PaperConfig(
         symbols=symbols,
         bar_timeframe=bar_timeframe,
+        data_source=data_source,
+        execution_venue=execution_venue,
         alpaca_feed=alpaca_feed,
-        lookback_bars=lookback_bars,
+        lookback_bars=int(effective_lookback_bars),
         poll_seconds=poll_seconds,
+        initial_cash_usd=float(initial_cash),
         max_position_notional_usd=float(max_position_notional_usd),
         slippage_bps=float(
             (3.0 if mkt == Market.CRYPTO else 1.25 if mkt == Market.DERIVATIVES else 0.0)
@@ -1280,19 +1485,36 @@ def paper(
             else slippage_bps
         ),
         taker_fee_bps=float(
-            (25.0 if mkt == Market.CRYPTO else 3.0 if mkt == Market.DERIVATIVES else 0.0)
+            (
+                25.0
+                if mkt == Market.CRYPTO
+                else 10.0
+                if (mkt == Market.DERIVATIVES and data_source == "coinbase" and execution_venue == "coinbase")
+                else 3.0
+                if mkt == Market.DERIVATIVES
+                else 0.0
+            )
             if taker_fee_bps is None
             else taker_fee_bps
         ),
+        fixed_fee_per_contract_usd=float(effective_fixed_fee_per_contract_usd),
+        contract_size_units=float(effective_contract_size_units),
         allow_short=allow_short,
         regular_hours_only=regular_hours_only,
         allow_trading_when_closed=allow_trading_when_closed,
         limit_offset_bps=float(limit_offset_bps),
-        dry_run=dry_run,
+        dry_run=bool(effective_dry_run),
         market=mkt.value,
     )
 
-    logger.info("paper=%s allow_live=%s", settings.paper, settings.allow_live)
+    if settings is not None:
+        logger.info("paper=%s allow_live=%s", settings.paper, settings.allow_live)
+    logger.info(
+        "paper data_source=%s execution_venue=%s dry_run=%s",
+        data_source,
+        execution_venue,
+        bool(effective_dry_run),
+    )
     run_paper_loop(settings=settings, strategy=strat, cfg=cfg, run_dir=run_dir, max_loops=max_loops)
 
 

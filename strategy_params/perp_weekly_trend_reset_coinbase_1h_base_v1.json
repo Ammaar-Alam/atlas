@@ -1,0 +1,25 @@
+{
+  "perp_weekly_trend_reset": {
+    "lookback_days": 21,
+    "momentum_threshold_bps": 50.0,
+    "ema_fast": 8,
+    "ema_slow": 34,
+    "require_ema_confirmation": true,
+    "target_leverage": 3.0,
+    "max_margin_utilization": 0.55,
+    "maintenance_margin_rate": 0.05,
+    "atr_window": 20,
+    "stop_atr_mult": 2.2,
+    "trail_atr_mult": 6.0,
+    "min_liq_buffer_atr": 5.0,
+    "use_stops": true,
+    "rebalance_weekday_utc": 0,
+    "rebalance_hour_utc": 0,
+    "rebalance_minute_utc": 5,
+    "weekly_nudge_exposure": 0.0,
+    "min_trade_notional_usd": 50.0,
+    "heartbeat_exposure": 0.0,
+    "heartbeat_hold_bars": 8,
+    "max_hold_bars": 336
+  }
+}

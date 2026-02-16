@@ -3,21 +3,27 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Optional
 from threading import Event
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from atlas.broker.alpaca_broker import (
-    submit_limit_order,
-    submit_market_order,
+    submit_limit_order as submit_alpaca_limit_order,
+    submit_market_order as submit_alpaca_market_order,
     trading_client,
-    wait_for_fill,
+    wait_for_fill as wait_for_alpaca_fill,
+)
+from atlas.broker.coinbase_broker import (
+    client as coinbase_client,
+    submit_market_order as submit_coinbase_market_order,
+    wait_for_fill as wait_for_coinbase_fill,
 )
 from atlas.config import AlpacaSettings
 from atlas.data.alpaca_data import parse_alpaca_feed, to_alpaca_timeframe
@@ -33,18 +39,40 @@ logger = logging.getLogger(__name__)
 class PaperConfig:
     symbols: list[str]
     bar_timeframe: str
+    data_source: str
+    execution_venue: str
     alpaca_feed: str
     lookback_bars: int
     poll_seconds: int
+    initial_cash_usd: float
     max_position_notional_usd: float
     slippage_bps: float
     taker_fee_bps: float
+    fixed_fee_per_contract_usd: float
+    contract_size_units: float
     allow_short: bool
     regular_hours_only: bool
     allow_trading_when_closed: bool
     limit_offset_bps: float
     dry_run: bool
     market: str = "equity"
+
+
+def _fixed_fee_from_fill_qty(
+    *,
+    fill_qty: float,
+    fixed_fee_per_contract_usd: float,
+    contract_size_units: float,
+) -> float:
+    if float(fixed_fee_per_contract_usd) <= 0.0:
+        return 0.0
+    contract_size = float(contract_size_units or 1.0)
+    if contract_size <= 0.0:
+        contract_size = 1.0
+    contracts = math.ceil((abs(float(fill_qty)) - 1e-12) / contract_size)
+    if contracts <= 0:
+        return 0.0
+    return float(contracts * float(fixed_fee_per_contract_usd))
 
 
 def _stock_bars_client(settings: AlpacaSettings):
@@ -162,6 +190,62 @@ def _fetch_recent_bars(
     return res
 
 
+def _coinbase_granularity_for_fetch(fetch_minutes: int) -> str:
+    if fetch_minutes <= 1:
+        return "ONE_MINUTE"
+    if fetch_minutes == 5:
+        return "FIVE_MINUTE"
+    if fetch_minutes in {15, 30}:
+        # Coinbase does not provide native 30-minute candles.
+        return "FIFTEEN_MINUTE"
+    if fetch_minutes == 60:
+        return "ONE_HOUR"
+    if fetch_minutes == 360:
+        return "SIX_HOUR"
+    if fetch_minutes == 1440:
+        return "ONE_DAY"
+    return "ONE_MINUTE"
+
+
+def _fetch_recent_bars_coinbase(
+    *,
+    client,
+    symbols: list[str],
+    lookback_bars: int,
+    timeframe: str,
+) -> pd.DataFrame:
+    tf = parse_bar_timeframe(timeframe)
+    fetch_minutes = int(tf.minutes)
+    granularity = _coinbase_granularity_for_fetch(fetch_minutes)
+    end = pd.Timestamp.now(tz=ZoneInfo("UTC"))
+    start = end - timedelta(minutes=max(lookback_bars * fetch_minutes * 2, 10))
+
+    frames: list[pd.DataFrame] = []
+    for symbol in symbols:
+        df = client.get_product_candles(
+            product_id=symbol,
+            start=start.to_pydatetime(),
+            end=end.to_pydatetime(),
+            granularity=granularity,
+        )
+        if df is None or df.empty:
+            continue
+        out = df[["open", "high", "low", "close", "volume"]].copy()
+        out = out.sort_index()
+        out["symbol"] = symbol
+        out = out.reset_index(names="timestamp").set_index(["symbol", "timestamp"])
+        frames.append(out)
+
+    empty = pd.DataFrame(
+        columns=["open", "high", "low", "close", "volume"],
+        index=pd.MultiIndex.from_arrays([[], []], names=["symbol", "timestamp"]),
+    )
+    if not frames:
+        return empty
+
+    return pd.concat(frames).sort_index()
+
+
 def _align_to_next_bar_open(now: pd.Timestamp, *, timeframe_minutes: int) -> float:
     timeframe_minutes = int(timeframe_minutes) if timeframe_minutes > 0 else 1
     current = now.floor("min")
@@ -174,7 +258,7 @@ def _align_to_next_bar_open(now: pd.Timestamp, *, timeframe_minutes: int) -> flo
 
 def run_paper_loop(
     *,
-    settings: AlpacaSettings,
+    settings: Optional[AlpacaSettings],
     strategy: Strategy,
     cfg: PaperConfig,
     run_dir: Path,
@@ -189,8 +273,40 @@ def run_paper_loop(
     decisions_jsonl_path = run_dir / "decisions.jsonl"
     equity_path = run_dir / "equity_curve.csv"
 
-    trade_client = trading_client(settings)
+    data_source = str(cfg.data_source or "alpaca").strip().lower()
+    execution_venue = str(cfg.execution_venue or "alpaca").strip().lower()
+    if data_source not in {"alpaca", "coinbase"}:
+        raise ValueError(f"unsupported paper data_source: {cfg.data_source!r}")
+    if execution_venue not in {"alpaca", "coinbase"}:
+        raise ValueError(f"unsupported paper execution_venue: {cfg.execution_venue!r}")
+
+    trade_client = None
+    if execution_venue == "alpaca":
+        if settings is None:
+            raise ValueError("alpaca settings are required for execution_venue=alpaca")
+        trade_client = trading_client(settings)
+
+    cb_client = None
+    if data_source == "coinbase" or execution_venue == "coinbase":
+        cb_client = coinbase_client()
+
     mkt = parse_market(cfg.market)
+    if mkt == Market.DERIVATIVES and data_source != "coinbase":
+        raise ValueError("market=derivatives requires data_source=coinbase")
+    if mkt == Market.DERIVATIVES and execution_venue != "coinbase":
+        raise ValueError("market=derivatives requires execution_venue=coinbase")
+    if mkt == Market.EQUITY and execution_venue == "coinbase":
+        raise ValueError("execution_venue=coinbase supports crypto/derivatives only")
+    if execution_venue == "coinbase" and data_source != "coinbase":
+        raise ValueError("execution_venue=coinbase currently requires data_source=coinbase")
+    if execution_venue == "coinbase" and (not cfg.dry_run):
+        if cb_client is None:
+            raise ValueError("coinbase client is required for execution_venue=coinbase")
+        if not (cb_client.settings.api_key and cb_client.settings.api_secret):
+            raise ValueError(
+                "missing coinbase api credentials: set COINBASE_API_KEY and COINBASE_API_SECRET in .env"
+            )
+
     cfg_symbols = coerce_symbols_for_market(cfg.symbols, mkt)
     if not cfg_symbols:
         raise ValueError("cfg.symbols must be non-empty")
@@ -198,11 +314,25 @@ def run_paper_loop(
 
     fetch_timeframe = cfg.bar_timeframe
     fetch_lookback_bars = int(cfg.lookback_bars)
-    if mkt == Market.CRYPTO and int(tf.minutes) >= 120 and int(tf.minutes) % 60 == 0:
-        # For multi-hour crypto, fetch 1H bars and resample locally to keep candle boundaries
+    if (
+        mkt in {Market.CRYPTO, Market.DERIVATIVES}
+        and int(tf.minutes) >= 120
+        and int(tf.minutes) % 60 == 0
+    ):
+        # For multi-hour crypto/derivatives, fetch 1H bars and resample locally to keep candle boundaries
         # deterministic (matches `load_universe_bars` behavior used in backtests).
         fetch_timeframe = "1H"
         fetch_lookback_bars = int(cfg.lookback_bars * (int(tf.minutes) // 60))
+    elif data_source == "coinbase" and int(tf.minutes) == 30:
+        # Coinbase has no native 30-minute bars; fetch 15-minute and resample locally.
+        fetch_timeframe = "15Min"
+        fetch_lookback_bars = int(cfg.lookback_bars * 2)
+
+    synthetic_cash = float(cfg.initial_cash_usd) if float(cfg.initial_cash_usd) > 0 else float(
+        cfg.max_position_notional_usd
+    )
+    synthetic_positions: dict[str, float] = {s: 0.0 for s in cfg_symbols}
+    synthetic_entry_prices: dict[str, float] = {s: 0.0 for s in cfg_symbols}
 
     with (
         orders_path.open("w", newline="") as f_orders,
@@ -246,7 +376,7 @@ def run_paper_loop(
         last_handled_bar_open: Optional[pd.Timestamp] = None
 
         now_for_bins = pd.Timestamp.now(tz=NY_TZ)
-        if mkt == Market.CRYPTO:
+        if mkt in {Market.CRYPTO, Market.DERIVATIVES}:
             now_for_bins = now_for_bins.tz_convert(ZoneInfo("UTC"))
         initial_sleep = _align_to_next_bar_open(now_for_bins, timeframe_minutes=tf.minutes)
         if initial_sleep >= 1.0:
@@ -268,7 +398,9 @@ def run_paper_loop(
 
             market_open = True
             clock = None
-            if mkt != Market.CRYPTO:
+            if execution_venue == "alpaca" and mkt != Market.CRYPTO:
+                if trade_client is None:
+                    raise RuntimeError("alpaca trade client is not initialized")
                 clock = trade_client.get_clock()
                 market_open = bool(clock.is_open)
                 if (not market_open) and (not cfg.allow_trading_when_closed):
@@ -307,10 +439,10 @@ def run_paper_loop(
                             return
                     else:
                         time.sleep(sleep_s)
-                continue
+                    continue
 
             now = pd.Timestamp.now(tz=NY_TZ)
-            now_bins = now.tz_convert(ZoneInfo("UTC")) if mkt == Market.CRYPTO else now
+            now_bins = now.tz_convert(ZoneInfo("UTC")) if mkt in {Market.CRYPTO, Market.DERIVATIVES} else now
             bar_open = now_bins.floor(f"{int(tf.minutes)}min")
             if last_handled_bar_open is not None and bar_open <= last_handled_bar_open:
                 sleep_s = _align_to_next_bar_open(now_bins, timeframe_minutes=tf.minutes)
@@ -325,26 +457,39 @@ def run_paper_loop(
 
             last_handled_bar_open = bar_open
 
-            bars_df = _fetch_recent_bars(
-                settings=settings,
-                symbols=cfg_symbols,
-                lookback_bars=fetch_lookback_bars,
-                timeframe=fetch_timeframe,
-                feed=cfg.alpaca_feed,
-                market=mkt,
-            )
+            if data_source == "alpaca":
+                if settings is None:
+                    raise RuntimeError("alpaca settings are required for data_source=alpaca")
+                bars_df = _fetch_recent_bars(
+                    settings=settings,
+                    symbols=cfg_symbols,
+                    lookback_bars=fetch_lookback_bars,
+                    timeframe=fetch_timeframe,
+                    feed=cfg.alpaca_feed,
+                    market=mkt,
+                )
+            else:
+                if cb_client is None:
+                    raise RuntimeError("coinbase client is not initialized")
+                bars_df = _fetch_recent_bars_coinbase(
+                    client=cb_client,
+                    symbols=cfg_symbols,
+                    lookback_bars=fetch_lookback_bars,
+                    timeframe=fetch_timeframe,
+                )
+
             if not isinstance(bars_df.index, pd.MultiIndex):
-                raise RuntimeError("expected multi-index bars response from alpaca")
+                raise RuntimeError("expected multi-index bars response")
 
             bars_by_symbol: dict[str, pd.DataFrame] = {}
             symbols_present = set(bars_df.index.get_level_values(0).unique())
             for symbol in cfg_symbols:
                 if symbol not in symbols_present:
                     logger.warning(
-                        "alpaca returned no bars for %s (market=%s feed=%s)",
+                        "%s returned no bars for %s (market=%s)",
+                        data_source,
                         symbol,
                         mkt.value,
-                        cfg.alpaca_feed,
                     )
                     bars_by_symbol[symbol] = pd.DataFrame(
                         columns=["open", "high", "low", "close", "volume"],
@@ -355,7 +500,7 @@ def run_paper_loop(
                 df = bars_df.xs(symbol)
                 df = df[["open", "high", "low", "close", "volume"]].copy()
                 df = df.sort_index()
-                if mkt == Market.CRYPTO:
+                if mkt in {Market.CRYPTO, Market.DERIVATIVES}:
                     df.index = df.index.tz_convert(ZoneInfo("UTC"))
                 if cfg.regular_hours_only and mkt == Market.EQUITY:
                     df = filter_regular_hours(df)
@@ -367,8 +512,6 @@ def run_paper_loop(
                     df = df.iloc[-cfg.lookback_bars :]
                 bars_by_symbol[symbol] = df
 
-            equity = float(trade_client.get_account().equity)
-            cash_balance = float(trade_client.get_account().cash)
             decision_ts = bar_open
 
             for symbol in cfg_symbols:
@@ -380,20 +523,49 @@ def run_paper_loop(
                     df = df.iloc[:-1]
                     bars_by_symbol[symbol] = df
 
+            last_prices: dict[str, float] = {}
+            for symbol in cfg_symbols:
+                df = bars_by_symbol.get(symbol)
+                if df is not None and len(df):
+                    last_prices[symbol] = float(df["close"].iloc[-1])
+
+            if execution_venue == "alpaca":
+                if trade_client is None:
+                    raise RuntimeError("alpaca trade client is not initialized")
+                equity = float(trade_client.get_account().equity)
+                cash_balance = float(trade_client.get_account().cash)
+                positions: dict[str, float] = {}
+                for symbol in cfg_symbols:
+                    try:
+                        pos = trade_client.get_open_position(symbol_or_asset_id=symbol)
+                        positions[symbol] = float(pos.qty)
+                    except Exception:
+                        positions[symbol] = 0.0
+            else:
+                cash_balance = float(synthetic_cash)
+                positions = {s: float(synthetic_positions.get(s, 0.0)) for s in cfg_symbols}
+                equity = float(cash_balance)
+                if mkt == Market.DERIVATIVES:
+                    for symbol, qty in positions.items():
+                        last_px = float(last_prices.get(symbol, 0.0))
+                        entry_px = float(synthetic_entry_prices.get(symbol, 0.0))
+                        if abs(qty) <= 1e-12 or last_px <= 0 or entry_px <= 0:
+                            continue
+                        if qty > 0:
+                            equity += float((last_px - entry_px) * qty)
+                        else:
+                            equity += float((entry_px - last_px) * abs(qty))
+                else:
+                    for symbol, qty in positions.items():
+                        last_px = float(last_prices.get(symbol, 0.0))
+                        equity += float(qty) * last_px
+
             if day_key != decision_ts.date():
                 day_key = decision_ts.date()
                 day_start_equity = equity
                 holding_bars = {s: 0 for s in cfg_symbols}
             if day_start_equity is None:
                 day_start_equity = equity
-
-            positions: dict[str, float] = {}
-            for symbol in cfg_symbols:
-                try:
-                    pos = trade_client.get_open_position(symbol_or_asset_id=symbol)
-                    positions[symbol] = float(pos.qty)
-                except Exception:
-                    positions[symbol] = 0.0
 
             day_pnl = float(equity - float(day_start_equity))
             day_return = (
@@ -421,6 +593,8 @@ def run_paper_loop(
                     "max_position_notional_usd": float(cfg.max_position_notional_usd),
                     "slippage_bps": float(cfg.slippage_bps),
                     "taker_fee_bps": float(cfg.taker_fee_bps),
+                    "fixed_fee_per_contract_usd": float(cfg.fixed_fee_per_contract_usd),
+                    "contract_size_units": float(cfg.contract_size_units),
                 },
             )
             decision = strategy.target_exposures(bars_by_symbol, state)
@@ -495,21 +669,38 @@ def run_paper_loop(
                 if cfg.dry_run:
                     order_id = "dry_run"
                 else:
-                    if market_open:
-                        order_id = submit_market_order(
-                            client=trade_client, symbol=symbol, qty=qty, side=side, market=mkt.value
-                        )
+                    if execution_venue == "alpaca":
+                        if trade_client is None:
+                            raise RuntimeError("alpaca trade client is not initialized")
+                        if market_open:
+                            order_id = submit_alpaca_market_order(
+                                client=trade_client, symbol=symbol, qty=qty, side=side, market=mkt.value
+                            )
+                        else:
+                            last_price = float(bars_by_symbol[symbol]["close"].iloc[-1])
+                            offset = float(cfg.limit_offset_bps) / 10_000.0
+                            px = (
+                                last_price * (1.0 + offset)
+                                if side.upper() == "BUY"
+                                else last_price * (1.0 - offset)
+                            )
+                            order_id = submit_alpaca_limit_order(
+                                client=trade_client,
+                                symbol=symbol,
+                                qty=qty,
+                                side=side,
+                                limit_price=round(float(px), 2),
+                                extended_hours=True,
+                                market=mkt.value,
+                            )
                     else:
-                        last_price = float(bars_by_symbol[symbol]["close"].iloc[-1])
-                        offset = float(cfg.limit_offset_bps) / 10_000.0
-                        px = last_price * (1.0 + offset) if side.upper() == "BUY" else last_price * (1.0 - offset)
-                        order_id = submit_limit_order(
-                            client=trade_client,
+                        if cb_client is None:
+                            raise RuntimeError("coinbase client is not initialized")
+                        order_id = submit_coinbase_market_order(
+                            client=cb_client,
                             symbol=symbol,
                             qty=qty,
                             side=side,
-                            limit_price=round(float(px), 2),
-                            extended_hours=True,
                             market=mkt.value,
                         )
 
@@ -528,9 +719,19 @@ def run_paper_loop(
                 f_orders_jsonl.flush()
 
                 if not cfg.dry_run:
-                    fill = wait_for_fill(
-                        client=trade_client, order_id=order_id, timeout_s=60, poll_s=2.0
-                    )
+                    if execution_venue == "alpaca":
+                        if trade_client is None:
+                            raise RuntimeError("alpaca trade client is not initialized")
+                        fill = wait_for_alpaca_fill(
+                            client=trade_client, order_id=order_id, timeout_s=60, poll_s=2.0
+                        )
+                    else:
+                        if cb_client is None:
+                            raise RuntimeError("coinbase client is not initialized")
+                        fill = wait_for_coinbase_fill(
+                            client=cb_client, order_id=order_id, timeout_s=60, poll_s=2.0
+                        )
+
                     fill_row = {
                         "timestamp": now_ny().isoformat(),
                         "symbol": fill.symbol,
@@ -545,6 +746,72 @@ def run_paper_loop(
                     f_fills_jsonl.write(json.dumps(fill_row) + "\n")
                     f_fills_jsonl.flush()
 
+                    if execution_venue == "coinbase":
+                        fill_qty = float(fill.filled_qty or 0.0)
+                        fill_px = (
+                            float(fill.filled_avg_price)
+                            if fill.filled_avg_price not in (None, "")
+                            else float(last_prices.get(symbol, 0.0))
+                        )
+                        if fill_qty > 0 and fill_px > 0:
+                            signed = fill_qty if side.upper() == "BUY" else -fill_qty
+                            prev_qty = float(synthetic_positions.get(symbol, 0.0))
+                            prev_entry = float(synthetic_entry_prices.get(symbol, 0.0))
+
+                            if mkt == Market.DERIVATIVES:
+                                reducing_or_closing = (
+                                    (prev_qty > 1e-12 and signed < 0)
+                                    or (prev_qty < -1e-12 and signed > 0)
+                                )
+                                if reducing_or_closing and prev_entry > 0:
+                                    close_qty = float(min(abs(prev_qty), abs(signed)))
+                                    if close_qty > 0:
+                                        if prev_qty > 0:
+                                            realized = float((fill_px - prev_entry) * close_qty)
+                                        else:
+                                            realized = float((prev_entry - fill_px) * close_qty)
+                                        synthetic_cash = float(synthetic_cash + realized)
+
+                                percent_fee = float(abs(fill_qty * fill_px) * (float(cfg.taker_fee_bps) / 10_000.0))
+                                contract_size = float(fill.contract_size or cfg.contract_size_units or 1.0)
+                                fixed_fee = _fixed_fee_from_fill_qty(
+                                    fill_qty=fill_qty,
+                                    fixed_fee_per_contract_usd=float(cfg.fixed_fee_per_contract_usd),
+                                    contract_size_units=contract_size,
+                                )
+                                fee_usd = float(percent_fee + fixed_fee)
+                                synthetic_cash = float(synthetic_cash - fee_usd)
+
+                                new_qty = float(prev_qty + signed)
+                                if abs(new_qty) <= 1e-12:
+                                    new_qty = 0.0
+                                    synthetic_entry_prices[symbol] = 0.0
+                                elif abs(prev_qty) <= 1e-12:
+                                    synthetic_entry_prices[symbol] = float(fill_px)
+                                elif (prev_qty > 0 and new_qty > 0 and signed > 0) or (
+                                    prev_qty < 0 and new_qty < 0 and signed < 0
+                                ):
+                                    weighted_entry = (
+                                        abs(prev_qty) * prev_entry + abs(signed) * float(fill_px)
+                                    ) / abs(new_qty)
+                                    synthetic_entry_prices[symbol] = float(weighted_entry)
+                                elif (prev_qty > 0 and new_qty < 0) or (prev_qty < 0 and new_qty > 0):
+                                    synthetic_entry_prices[symbol] = float(fill_px)
+                                # If reducing without flipping, keep prior entry.
+                                synthetic_positions[symbol] = float(new_qty)
+                            else:
+                                synthetic_positions[symbol] = float(prev_qty + signed)
+                                synthetic_cash = float(synthetic_cash - (signed * fill_px))
+                                percent_fee = float(abs(fill_qty * fill_px) * (float(cfg.taker_fee_bps) / 10_000.0))
+                                contract_size = float(fill.contract_size or cfg.contract_size_units or 1.0)
+                                fixed_fee = _fixed_fee_from_fill_qty(
+                                    fill_qty=fill_qty,
+                                    fixed_fee_per_contract_usd=float(cfg.fixed_fee_per_contract_usd),
+                                    contract_size_units=contract_size,
+                                )
+                                fee_usd = float(percent_fee + fixed_fee)
+                                synthetic_cash = float(synthetic_cash - fee_usd)
+
                 last_target[symbol] = target_exposure
 
             pd.DataFrame(
@@ -558,9 +825,10 @@ def run_paper_loop(
             ).to_csv(equity_path, mode="a", header=not equity_path.exists(), index=False)
 
             loops += 1
-            sleep_s = _align_to_next_bar_open(
-                pd.Timestamp.now(tz=NY_TZ), timeframe_minutes=tf.minutes
-            )
+            sleep_now = pd.Timestamp.now(tz=NY_TZ)
+            if mkt in {Market.CRYPTO, Market.DERIVATIVES}:
+                sleep_now = sleep_now.tz_convert(ZoneInfo("UTC"))
+            sleep_s = _align_to_next_bar_open(sleep_now, timeframe_minutes=tf.minutes)
             logger.info("sleeping until next bar open in %.1fs", sleep_s)
             if stop_event is not None:
                 if stop_event.wait(sleep_s):

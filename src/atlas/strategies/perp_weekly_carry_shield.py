@@ -122,6 +122,10 @@ class PerpWeeklyCarryShield(Strategy):
     kill_switch: float = 0.12
     weekly_profit_target: float = 0.006
     weekly_loss_limit: float = 0.006
+    fallback_trend_floor_exposure: float = 0.0
+    fallback_trend_floor_er_min: float = 0.0
+    fallback_trend_floor_choppiness_max: float = 100.0
+    fallback_trend_floor_min_momentum_bps: float = 0.0
     weekly_heartbeat_exposure: float = 0.01
     weekly_heartbeat_hold_bars: int = 1
 
@@ -332,11 +336,37 @@ class PerpWeeklyCarryShield(Strategy):
             can_exit = held >= int(max(1, self.min_hold_bars))
             trend_side = _sign(float(f.get("trend_z", 0.0)))
             now_side = _sign(cur_exp)
+            floor_exp = _clamp(
+                float(self.fallback_trend_floor_exposure),
+                0.0,
+                float(self.max_per_symbol_exposure),
+            )
+            is_floor_pos = floor_exp > 0.0 and abs(cur_exp) <= (floor_exp + 1e-12)
+            regime_er_min = (
+                float(self.fallback_trend_floor_er_min)
+                if is_floor_pos
+                else float(self.er_min)
+            )
+            regime_chop_max = (
+                float(self.fallback_trend_floor_choppiness_max)
+                if is_floor_pos
+                else float(self.choppiness_max)
+            )
             regime_ok = (
                 float(f.get("er", 0.0)) >= float(self.er_min)
                 and float(f.get("choppiness", 100.0)) <= float(self.choppiness_max)
                 and float(f.get("atr_bps", 0.0)) >= float(self.min_atr_bps)
             )
+            if is_floor_pos:
+                regime_ok = (
+                    float(f.get("er", 0.0)) >= float(regime_er_min)
+                    and float(f.get("choppiness", 100.0)) <= float(regime_chop_max)
+                    and float(f.get("atr_bps", 0.0)) >= float(self.min_atr_bps)
+                )
+                if abs(float(f.get("mom_bps", 0.0))) < float(
+                    self.fallback_trend_floor_min_momentum_bps
+                ):
+                    regime_ok = False
             if can_exit and ((not regime_ok) or (trend_side != 0 and trend_side != now_side)):
                 targets[s] = 0.0
                 self._entry_bar.pop(s, None)
@@ -414,22 +444,67 @@ class PerpWeeklyCarryShield(Strategy):
                     if abs(new_targets[s]) > 1e-8 and s not in self._entry_bar:
                         self._entry_bar[s] = int(self._bars_seen)
             else:
-                # Weekly heartbeat: ensure at least one small trade if no candidate passes.
-                hb_sym = symbols[0]
-                hb_feat = features.get(hb_sym)
-                if hb_feat is not None:
-                    side = _sign(float(hb_feat.get("mom_bps", 0.0)))
-                    if side == 0:
-                        side = 1
-                    if not bool(state.allow_short) and side < 0:
-                        side = 1
-                    hb_exp = _clamp(float(self.weekly_heartbeat_exposure), 0.0, float(self.max_per_symbol_exposure))
-                    if hb_exp >= min_exp:
-                        new_targets[hb_sym] = float(hb_exp) * float(side)
-                        self._entry_bar[hb_sym] = int(self._bars_seen)
-                        self._heartbeat_symbol = hb_sym
-                        self._heartbeat_return_exposure = float(new_targets[hb_sym])
-                        self._heartbeat_return_bar = int(self._bars_seen) + int(max(1, self.weekly_heartbeat_hold_bars))
+                floor_exp = _clamp(
+                    float(self.fallback_trend_floor_exposure),
+                    0.0,
+                    float(self.max_per_symbol_exposure),
+                )
+                floor_picked = False
+                if floor_exp >= min_exp:
+                    floor_ranked: list[tuple[str, float, int]] = []
+                    for s in symbols:
+                        f = features.get(s)
+                        if f is None:
+                            continue
+                        er = float(f.get("er", 0.0))
+                        chop = float(f.get("choppiness", 100.0))
+                        mom = float(f.get("mom_bps", 0.0))
+                        atr_bps = float(f.get("atr_bps", 0.0))
+                        if atr_bps < float(self.min_atr_bps):
+                            continue
+                        if er < float(self.fallback_trend_floor_er_min):
+                            continue
+                        if chop > float(self.fallback_trend_floor_choppiness_max):
+                            continue
+                        if abs(mom) < float(self.fallback_trend_floor_min_momentum_bps):
+                            continue
+                        side = _sign(float(f.get("trend_z", 0.0)))
+                        if side == 0:
+                            side = _sign(mom)
+                        if side == 0:
+                            continue
+                        if not bool(state.allow_short) and side < 0:
+                            continue
+                        # Favor cleaner directional states for fallback floor exposure.
+                        rank = abs(float(f.get("trend_z", 0.0))) + 0.5 * er - 0.01 * chop
+                        floor_ranked.append((s, float(rank), int(side)))
+                    floor_ranked.sort(key=lambda t: float(t[1]), reverse=True)
+                    if floor_ranked:
+                        fs, _, fside = floor_ranked[0]
+                        new_targets[fs] = float(floor_exp) * float(fside)
+                        self._entry_bar[fs] = int(self._bars_seen)
+                        self._heartbeat_symbol = None
+                        self._heartbeat_return_exposure = 0.0
+                        self._heartbeat_return_bar = 0
+                        floor_picked = True
+
+                if not floor_picked:
+                    # Weekly heartbeat: ensure at least one small trade if no candidate passes.
+                    hb_sym = symbols[0]
+                    hb_feat = features.get(hb_sym)
+                    if hb_feat is not None:
+                        side = _sign(float(hb_feat.get("mom_bps", 0.0)))
+                        if side == 0:
+                            side = 1
+                        if not bool(state.allow_short) and side < 0:
+                            side = 1
+                        hb_exp = _clamp(float(self.weekly_heartbeat_exposure), 0.0, float(self.max_per_symbol_exposure))
+                        if hb_exp >= min_exp:
+                            new_targets[hb_sym] = float(hb_exp) * float(side)
+                            self._entry_bar[hb_sym] = int(self._bars_seen)
+                            self._heartbeat_symbol = hb_sym
+                            self._heartbeat_return_exposure = float(new_targets[hb_sym])
+                            self._heartbeat_return_bar = int(self._bars_seen) + int(max(1, self.weekly_heartbeat_hold_bars))
 
             targets = new_targets
             self._last_rebalance_bar = int(self._bars_seen)

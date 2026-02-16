@@ -434,6 +434,14 @@ def _perp_trend_vol_guard_space() -> list[Param]:
         FloatRange("weekly_loss_limit", 0.005, 0.08, decimals=4),
         FloatRange("weekly_profit_target", 0.005, 0.08, decimals=4),
         FloatRange("weekly_lock_risk_scale", 0.0, 1.0, decimals=4),
+        FloatRange("weekly_chase_target", 0.0, 0.03, decimals=4),
+        FloatRange("weekly_chase_k", 0.0, 12.0, decimals=4),
+        FloatRange("weekly_chase_max_extra_exposure", 0.0, 0.50, decimals=4),
+        IntRange("weekly_chase_start_weekday_utc", 0, 6),
+        FloatRange("fallback_floor_exposure", 0.0, 0.35, decimals=4),
+        FloatRange("fallback_trend_strength_min", 0.0, 0.80, decimals=4),
+        FloatRange("fallback_min_momentum_bps", 0.0, 100.0, decimals=3),
+        FloatRange("fallback_min_atr_bps", 0.5, 25.0, decimals=3),
         FloatRange("daily_loss_limit", 0.005, 0.08, decimals=4),
         FloatRange("kill_switch", 0.02, 0.30, decimals=4),
     ]
@@ -468,6 +476,10 @@ def _perp_weekly_carry_shield_space() -> list[Param]:
         FloatRange("kill_switch", 0.02, 0.30, decimals=4),
         FloatRange("weekly_profit_target", 0.001, 0.03, decimals=4),
         FloatRange("weekly_loss_limit", 0.001, 0.03, decimals=4),
+        FloatRange("fallback_trend_floor_exposure", 0.0, 0.30, decimals=4),
+        FloatRange("fallback_trend_floor_er_min", 0.0, 0.80, decimals=3),
+        FloatRange("fallback_trend_floor_choppiness_max", 35.0, 90.0, decimals=3),
+        FloatRange("fallback_trend_floor_min_momentum_bps", 0.0, 120.0, decimals=3),
         FloatRange("weekly_heartbeat_exposure", 0.0, 0.10, decimals=4),
         IntRange("weekly_heartbeat_hold_bars", 1, 8),
     ]
@@ -516,6 +528,33 @@ def _perp_weekly_trend_reset_space() -> list[Param]:
     ]
 
 
+def _perp_regime_adaptive_trend_capture_space() -> list[Param]:
+    return [
+        IntRange("mom_horizon_a", 72, 336, log=True),
+        IntRange("mom_horizon_b", 168, 1008, log=True),
+        IntRange("mom_horizon_c", 336, 2016, log=True),
+        IntRange("ema_fast_regime", 24, 168, log=True),
+        IntRange("ema_slow_regime", 168, 1512, log=True),
+        FloatRange("bear_exit_bps", 40.0, 260.0, decimals=3),
+        FloatRange("short_entry_bps", 120.0, 700.0, decimals=3),
+        IntRange("cooldown_bars", 12, 336, log=True),
+        FloatRange("long_base_exposure", 0.15, 0.95, decimals=4),
+        FloatRange("short_base_exposure", 0.0, 0.70, decimals=4),
+        FloatRange("extreme_vol_scale", 0.10, 0.80, decimals=4),
+        FloatRange("high_vol_scale", 0.25, 0.98, decimals=4),
+        FloatRange("extreme_vol_rank", 0.75, 0.98, decimals=4),
+        FloatRange("high_vol_rank", 0.50, 0.90, decimals=4),
+        IntRange("vol_lookback_bars", 24, 240, log=True),
+        IntRange("vol_regime_window", 168, 2160, log=True),
+        FloatRange("crash_threshold_bps", 120.0, 800.0, decimals=3),
+        IntRange("max_hold_bars", 72, 4032, log=True),
+        FloatRange("rebalance_exposure_threshold", 0.0, 0.08, decimals=4),
+        FloatRange("daily_loss_limit", 0.01, 0.12, decimals=4),
+        FloatRange("weekly_loss_limit", 0.02, 0.25, decimals=4),
+        FloatRange("kill_switch", 0.08, 0.55, decimals=4),
+    ]
+
+
 def get_search_space(strategy: str) -> list[Param]:
     strategy = (strategy or "").strip().lower().replace("-", "_")
     if strategy == "perp_flare":
@@ -550,6 +589,8 @@ def get_search_space(strategy: str) -> list[Param]:
         return _perp_trend_vol_guard_space()
     if strategy == "perp_weekly_carry_shield":
         return _perp_weekly_carry_shield_space()
+    if strategy == "perp_regime_adaptive_trend_capture":
+        return _perp_regime_adaptive_trend_capture_space()
     raise ValueError(f"no tuning space defined for strategy: {strategy}")
 
 
@@ -1266,6 +1307,30 @@ def validate_params(strategy: str, params: dict[str, Any]) -> bool:
                 return False
             if not (0.0 <= float(params.get("weekly_lock_risk_scale", 0.0)) <= 1.0):
                 return False
+            if float(params.get("weekly_chase_target", 0.0)) < 0:
+                return False
+            if float(params.get("weekly_chase_k", 0.0)) < 0:
+                return False
+            if float(params.get("weekly_chase_max_extra_exposure", 0.0)) < 0:
+                return False
+            if float(params.get("weekly_chase_max_extra_exposure", 0.0)) > float(
+                params.get("max_per_symbol_exposure", 0.0)
+            ):
+                return False
+            if not (0 <= int(params.get("weekly_chase_start_weekday_utc", 0)) <= 6):
+                return False
+            if float(params.get("fallback_floor_exposure", 0.0)) < 0:
+                return False
+            if float(params.get("fallback_floor_exposure", 0.0)) > float(
+                params.get("max_per_symbol_exposure", 0.0)
+            ):
+                return False
+            if float(params.get("fallback_trend_strength_min", 0.0)) < 0:
+                return False
+            if float(params.get("fallback_min_momentum_bps", 0.0)) < 0:
+                return False
+            if float(params.get("fallback_min_atr_bps", 0.0)) < 0:
+                return False
             if float(params.get("daily_loss_limit", 0.0)) <= 0:
                 return False
             if float(params.get("kill_switch", 0.0)) <= float(
@@ -1333,9 +1398,97 @@ def validate_params(strategy: str, params: dict[str, Any]) -> bool:
                 return False
             if float(params.get("weekly_loss_limit", 0.0)) <= 0:
                 return False
+            if float(params.get("fallback_trend_floor_exposure", 0.0)) < 0:
+                return False
+            if float(params.get("fallback_trend_floor_exposure", 0.0)) > float(
+                params.get("max_per_symbol_exposure", 0.0)
+            ):
+                return False
+            if float(params.get("fallback_trend_floor_er_min", 0.0)) < 0:
+                return False
+            if float(params.get("fallback_trend_floor_er_min", 0.0)) > 1.0:
+                return False
+            if float(params.get("fallback_trend_floor_choppiness_max", 100.0)) <= 0:
+                return False
+            if float(params.get("fallback_trend_floor_min_momentum_bps", 0.0)) < 0:
+                return False
             if float(params.get("weekly_heartbeat_exposure", 0.0)) < 0:
                 return False
             if int(params.get("weekly_heartbeat_hold_bars", 0)) < 1:
+                return False
+            return True
+        except Exception:
+            return False
+    if strategy == "perp_regime_adaptive_trend_capture":
+        try:
+            mom_a = int(params.get("mom_horizon_a", 0))
+            mom_b = int(params.get("mom_horizon_b", 0))
+            mom_c = int(params.get("mom_horizon_c", 0))
+            if not (mom_a > 0 and mom_b > 0 and mom_c > 0):
+                return False
+            if not (mom_a < mom_b < mom_c):
+                return False
+
+            ema_f = int(params.get("ema_fast_regime", 0))
+            ema_s = int(params.get("ema_slow_regime", 0))
+            if not (ema_f > 0 and ema_s > 0 and ema_f < ema_s):
+                return False
+
+            bear_exit = float(params.get("bear_exit_bps", 0.0))
+            short_entry = float(params.get("short_entry_bps", 0.0))
+            if bear_exit <= 0.0 or short_entry <= 0.0:
+                return False
+            if short_entry < bear_exit:
+                return False
+
+            cooldown = int(params.get("cooldown_bars", -1))
+            if cooldown < 0:
+                return False
+
+            long_exp = float(params.get("long_base_exposure", 0.0))
+            short_exp = float(params.get("short_base_exposure", 0.0))
+            if not (0.0 <= short_exp <= 1.0 and 0.0 <= long_exp <= 1.0):
+                return False
+            if long_exp <= 0.0 and short_exp <= 0.0:
+                return False
+
+            ex_scale = float(params.get("extreme_vol_scale", 0.0))
+            hi_scale = float(params.get("high_vol_scale", 0.0))
+            if not (0.0 <= ex_scale <= 1.0 and 0.0 <= hi_scale <= 1.0):
+                return False
+
+            ex_rank = float(params.get("extreme_vol_rank", 0.0))
+            hi_rank = float(params.get("high_vol_rank", 0.0))
+            if not (0.0 <= hi_rank <= 1.0 and 0.0 <= ex_rank <= 1.0):
+                return False
+            if not (hi_rank < ex_rank):
+                return False
+
+            vol_lb = int(params.get("vol_lookback_bars", 0))
+            vol_rw = int(params.get("vol_regime_window", 0))
+            if not (vol_lb > 0 and vol_rw > vol_lb):
+                return False
+
+            crash = float(params.get("crash_threshold_bps", 0.0))
+            if crash <= 0.0:
+                return False
+
+            max_hold = int(params.get("max_hold_bars", 0))
+            if max_hold <= 0:
+                return False
+
+            reb_thr = float(params.get("rebalance_exposure_threshold", 0.0))
+            if not (0.0 <= reb_thr <= 1.0):
+                return False
+
+            dloss = float(params.get("daily_loss_limit", 0.0))
+            wloss = float(params.get("weekly_loss_limit", 0.0))
+            kill = float(params.get("kill_switch", 0.0))
+            if not (0.0 < dloss < 1.0 and 0.0 < wloss < 1.0 and 0.0 < kill < 1.0):
+                return False
+            if dloss > wloss:
+                return False
+            if wloss > kill:
                 return False
             return True
         except Exception:

@@ -4,7 +4,7 @@ import json
 import logging
 import time
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -26,6 +26,10 @@ class BacktestConfig:
     slippage_bps: float
     allow_short: bool
     taker_fee_bps: float = 0.0
+    fixed_fee_per_contract_usd: float = 0.0
+    contract_size_units: float = 1.0
+    fixed_fee_per_contract_usd_by_symbol: dict[str, float] = field(default_factory=dict)
+    contract_size_units_by_symbol: dict[str, float] = field(default_factory=dict)
     maintenance_margin_rate: float = 0.05
     liquidation_fee_rate: float = 0.01
 

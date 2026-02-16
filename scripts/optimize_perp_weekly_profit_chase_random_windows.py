@@ -60,7 +60,32 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--max-notional", type=float, default=2500.0)
     p.add_argument("--slippage-bps", type=float, default=1.5)
     p.add_argument("--taker-fee-bps", type=float, default=6.0)
-    p.add_argument("--allow-short", action="store_true", default=True)
+    p.add_argument(
+        "--coinbase-fee-model",
+        dest="coinbase_fee_model",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply Coinbase fixed per-contract fee model (only active for derivatives+coinbase).",
+    )
+    p.add_argument(
+        "--fixed-fee-per-contract-usd",
+        type=float,
+        default=0.15,
+        help="Fixed fee in USD per contract per side when coinbase fee model is active.",
+    )
+    p.add_argument(
+        "--contract-size-units",
+        type=float,
+        default=0.01,
+        help="Contract size in underlying units (e.g. BTC nano perp = 0.01 BTC).",
+    )
+    p.add_argument(
+        "--allow-short",
+        dest="allow_short",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable short exposure (default: true). Use --no-allow-short for long-only.",
+    )
     return p.parse_args()
 
 
@@ -257,6 +282,9 @@ def main() -> int:
                 "max_notional": float(args.max_notional),
                 "slippage_bps": float(args.slippage_bps),
                 "taker_fee_bps": float(args.taker_fee_bps),
+                "coinbase_fee_model": bool(args.coinbase_fee_model),
+                "fixed_fee_per_contract_usd": float(args.fixed_fee_per_contract_usd),
+                "contract_size_units": float(args.contract_size_units),
                 "allow_short": bool(args.allow_short),
                 "windows": [
                     {
@@ -271,6 +299,16 @@ def main() -> int:
             indent=2,
         )
     )
+
+    coinbase_fee_active = bool(
+        args.coinbase_fee_model
+        and str(args.market).strip().lower() == "derivatives"
+        and str(args.data_source).strip().lower() == "coinbase"
+    )
+    fixed_fee_per_contract_usd = float(args.fixed_fee_per_contract_usd) if coinbase_fee_active else 0.0
+    contract_size_units = float(args.contract_size_units) if coinbase_fee_active else 1.0
+    if contract_size_units <= 0.0:
+        contract_size_units = 1.0
 
     # Load bars once per selected window (cached by data layer).
     bars_per_window: dict[int, Any] = {}
@@ -294,6 +332,8 @@ def main() -> int:
         max_position_notional_usd=float(args.max_notional),
         slippage_bps=float(args.slippage_bps),
         taker_fee_bps=float(args.taker_fee_bps),
+        fixed_fee_per_contract_usd=float(fixed_fee_per_contract_usd),
+        contract_size_units=float(contract_size_units),
         allow_short=bool(args.allow_short),
         maintenance_margin_rate=0.05,
         liquidation_fee_rate=0.005,

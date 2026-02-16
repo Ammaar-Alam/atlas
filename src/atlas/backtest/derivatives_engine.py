@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import math
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime
@@ -121,6 +122,53 @@ def run_derivatives_backtest(
     max_notional_cap = float(cfg.max_position_notional_usd)
     slippage_rate = float(cfg.slippage_bps) / 10_000.0
     fee_rate = float(cfg.taker_fee_bps) / 10_000.0
+    default_fixed_fee_per_contract = max(
+        0.0, float(getattr(cfg, "fixed_fee_per_contract_usd", 0.0) or 0.0)
+    )
+    default_contract_size_units = float(getattr(cfg, "contract_size_units", 1.0) or 1.0)
+    if default_contract_size_units <= 0.0:
+        default_contract_size_units = 1.0
+
+    raw_fixed_fee_map = dict(getattr(cfg, "fixed_fee_per_contract_usd_by_symbol", {}) or {})
+    raw_contract_size_map = dict(getattr(cfg, "contract_size_units_by_symbol", {}) or {})
+    fixed_fee_per_contract_by_symbol: dict[str, float] = {}
+    contract_size_units_by_symbol: dict[str, float] = {}
+    for s in symbols:
+        fixed_fee_per_contract_by_symbol[s] = max(
+            0.0,
+            float(raw_fixed_fee_map.get(s, raw_fixed_fee_map.get(str(s).upper(), default_fixed_fee_per_contract)) or 0.0),
+        )
+        size = float(raw_contract_size_map.get(s, raw_contract_size_map.get(str(s).upper(), default_contract_size_units)) or 1.0)
+        if size <= 0.0:
+            size = 1.0
+        contract_size_units_by_symbol[s] = float(size)
+
+    def _quantize_qty_to_lot(symbol: str, qty: float) -> float:
+        contract_size_units = float(contract_size_units_by_symbol.get(symbol, default_contract_size_units))
+        enforce_contract_lots = bool(
+            float(fixed_fee_per_contract_by_symbol.get(symbol, default_fixed_fee_per_contract)) > 0.0
+            and contract_size_units > 0.0
+        )
+        if not enforce_contract_lots:
+            return float(qty)
+        steps = math.floor((abs(float(qty)) + 1e-12) / contract_size_units)
+        return float(math.copysign(steps * contract_size_units, float(qty)))
+
+    def _fixed_fee_for_qty(symbol: str, abs_qty: float) -> float:
+        fixed_fee_per_contract_usd = float(
+            fixed_fee_per_contract_by_symbol.get(symbol, default_fixed_fee_per_contract)
+        )
+        contract_size_units = float(
+            contract_size_units_by_symbol.get(symbol, default_contract_size_units)
+        )
+        enforce_contract_lots = bool(fixed_fee_per_contract_usd > 0.0 and contract_size_units > 0.0)
+        if fixed_fee_per_contract_usd <= 0.0 or abs_qty <= 0.0:
+            return 0.0
+        if enforce_contract_lots:
+            contracts = math.ceil((float(abs_qty) - 1e-12) / contract_size_units)
+        else:
+            contracts = abs_qty / contract_size_units
+        return float(contracts * fixed_fee_per_contract_usd)
 
     trades_rows: list[dict] = []
     equity_rows: list[dict] = []
@@ -131,6 +179,7 @@ def run_derivatives_backtest(
     peak_equity = float(cfg.initial_cash)
     prev_equity = float(cfg.initial_cash)
     last_progress_t = 0.0
+    bankrupt = False
 
     score_start_utc = _to_utc_timestamp(score_start) if score_start is not None else None
     score_end_utc = _to_utc_timestamp(score_end) if score_end is not None else None
@@ -230,7 +279,8 @@ def run_derivatives_backtest(
             
             # Liquidation Check (very simplified). Liquidate ALL if equity drops below total
             # maintenance margin requirement.
-            if equity < total_margin_used:
+            has_open_positions = any(abs(position_qty[s]) > 1e-9 for s in symbols)
+            if has_open_positions and total_margin_used > 0.0 and equity < total_margin_used:
                 bar_liquidated = True
                 logger.warning(f"LIQUIDATION at {ts}: Equity {equity} < Maint {total_margin_used}")
                 positions_before_liq = {sym: float(position_qty[sym]) for sym in symbols}
@@ -253,7 +303,9 @@ def run_derivatives_backtest(
                     entry = entry_prices[s]
                     realized_pnl = (fill_px - entry) * qty
 
-                    taker_fee = notional_val * fee_rate
+                    taker_fee_percent = float(notional_val * fee_rate)
+                    taker_fee_fixed = _fixed_fee_for_qty(s, abs(qty))
+                    taker_fee = float(taker_fee_percent + taker_fee_fixed)
                     liq_fee = notional_val * LIQ_FEE
 
                     cash += realized_pnl
@@ -272,6 +324,8 @@ def run_derivatives_backtest(
                         "fill_price": fill_px,
                         "notional": notional_val,
                         "fee_paid": taker_fee,
+                        "fee_percent_paid": taker_fee_percent,
+                        "fee_fixed_paid": taker_fee_fixed,
                         "liq_fee_paid": liq_fee,
                         "slippage_cost_est": slippage_cost_est,
                         "realized_pnl": realized_pnl,
@@ -316,6 +370,21 @@ def run_derivatives_backtest(
 
                 # Equity after liquidation is just cash.
                 equity = cash
+
+            if equity <= 0.0:
+                if not bankrupt:
+                    logger.warning("BANKRUPTCY LOCKOUT at %s: equity %.2f", ts, float(equity))
+                bankrupt = True
+                cash = 0.0
+                equity = 0.0
+                for s in symbols:
+                    position_qty[s] = 0.0
+                    entry_prices[s] = 0.0
+                    holding_bars[s] = 0
+                    current_targets[s] = 0.0
+                pending_target_exposures = None
+                pending_reason = None
+                pending_decision_context = None
             
             # Daily stats update
             if current_day != ts.date():
@@ -323,7 +392,7 @@ def run_derivatives_backtest(
                 day_start_equity = equity
 
             # Process Pending Orders (from previous bar's decision)
-            if i > 0 and pending_target_exposures is not None:
+            if (not bankrupt) and i > 0 and pending_target_exposures is not None:
                 targets: dict[str, float] = {
                     s: float(pending_target_exposures.get(s, 0.0) or 0.0) for s in symbols
                 }
@@ -350,8 +419,22 @@ def run_derivatives_backtest(
                     if px <= 0: continue
                     
                     desired_qty = target_notional / px
+                    desired_qty = _quantize_qty_to_lot(s, desired_qty)
                     current_q = position_qty[s]
                     delta_q = desired_qty - current_q
+
+                    symbol_contract_size = float(
+                        contract_size_units_by_symbol.get(s, default_contract_size_units)
+                    )
+                    symbol_fixed_fee = float(
+                        fixed_fee_per_contract_by_symbol.get(s, default_fixed_fee_per_contract)
+                    )
+                    enforce_contract_lots = bool(
+                        symbol_fixed_fee > 0.0 and symbol_contract_size > 0.0
+                    )
+                    if enforce_contract_lots:
+                        delta_q = _quantize_qty_to_lot(s, delta_q)
+                        desired_qty = current_q + delta_q
                     
                     if abs(delta_q) * px < 10.0: # Min trade size $10
                         if abs(desired_qty) < 1e-9 and abs(current_q) > 1e-9:
@@ -369,7 +452,9 @@ def run_derivatives_backtest(
                     # Transaction costs (taker fee). Slippage is embedded in fill_px; we record an
                     # estimate for analysis.
                     notional_val = abs(delta_q) * abs(fill_px)
-                    cost = notional_val * fee_rate  # Taker fee
+                    taker_fee_percent = float(notional_val * fee_rate)
+                    taker_fee_fixed = _fixed_fee_for_qty(s, abs(delta_q))
+                    cost = float(taker_fee_percent + taker_fee_fixed)  # Taker fee (percent + fixed/contract)
                     slippage_cost_est = abs(delta_q) * px * slippage_rate
                     bar_slippage_cost_est += float(slippage_cost_est)
                     bar_fees_paid += float(cost)
@@ -460,6 +545,8 @@ def run_derivatives_backtest(
                         "fill_price": fill_px,
                         "notional": notional_val,
                         "fee_paid": cost,
+                        "fee_percent_paid": taker_fee_percent,
+                        "fee_fixed_paid": taker_fee_fixed,
                         "liq_fee_paid": 0.0,
                         "slippage_cost_est": slippage_cost_est,
                         "realized_pnl": pnl if ((current_q > 0 and delta_q < 0) or (current_q < 0 and delta_q > 0)) else 0.0,
@@ -597,6 +684,21 @@ def run_derivatives_backtest(
             if i < len(idx) - 1:
                 next_ts = pd.Timestamp(idx[i+1])
                 decision_ts_utc = _to_utc_timestamp(next_ts)
+                if bankrupt:
+                    pending_target_exposures = {s: 0.0 for s in symbols}
+                    pending_reason = "BANKRUPT_LOCKOUT"
+                    decision_row = {
+                        "timestamp": next_ts.isoformat(),
+                        "targets": pending_target_exposures,
+                        "reason": pending_reason,
+                        "debug": {"bankrupt": True},
+                    }
+                    if f_decisions is not None and _in_score_window(
+                        decision_ts_utc, score_start_utc=score_start_utc, score_end_utc=score_end_utc
+                    ):
+                        f_decisions.write(json.dumps(decision_row) + "\n")
+                    continue
+
                 state = StrategyState(
                     timestamp=next_ts,
                     # Perpetual futures allow shorting, but we still respect the backtest
@@ -613,6 +715,10 @@ def run_derivatives_backtest(
                         "max_position_notional_usd": float(cfg.max_position_notional_usd),
                         "slippage_bps": float(cfg.slippage_bps),
                         "taker_fee_bps": float(cfg.taker_fee_bps),
+                        "fixed_fee_per_contract_usd": float(default_fixed_fee_per_contract),
+                        "contract_size_units": float(default_contract_size_units),
+                        "fixed_fee_per_contract_usd_by_symbol": dict(fixed_fee_per_contract_by_symbol),
+                        "contract_size_units_by_symbol": dict(contract_size_units_by_symbol),
                         "maintenance_margin_rate": float(cfg.maintenance_margin_rate),
                         "funding_rates": current_funding_rates,
                     },
@@ -655,6 +761,10 @@ def run_derivatives_backtest(
                                 "max_position_notional_usd": float(cfg.max_position_notional_usd),
                                 "slippage_bps": float(cfg.slippage_bps),
                                 "taker_fee_bps": float(cfg.taker_fee_bps),
+                                "fixed_fee_per_contract_usd": float(default_fixed_fee_per_contract),
+                                "contract_size_units": float(default_contract_size_units),
+                                "fixed_fee_per_contract_usd_by_symbol": dict(fixed_fee_per_contract_by_symbol),
+                                "contract_size_units_by_symbol": dict(contract_size_units_by_symbol),
                                 "maintenance_margin_rate": float(cfg.maintenance_margin_rate),
                                 "liquidation_fee_rate": float(cfg.liquidation_fee_rate),
                             },
@@ -676,7 +786,8 @@ def run_derivatives_backtest(
     trade_cols = [
         "timestamp", "symbol", "side", "qty", "fill_price", "notional",
         "cash_after", "position_qty_after", "strategy_reason",
-        "fee_paid", "liq_fee_paid", "slippage_cost_est", "realized_pnl", "liquidation"
+        "fee_paid", "fee_percent_paid", "fee_fixed_paid",
+        "liq_fee_paid", "slippage_cost_est", "realized_pnl", "liquidation"
     ]
     trades = pd.DataFrame(trades_rows, columns=trade_cols)
     equity_curve = pd.DataFrame(equity_rows)

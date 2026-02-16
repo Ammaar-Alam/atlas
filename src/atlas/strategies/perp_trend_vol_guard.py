@@ -114,6 +114,14 @@ class PerpTrendVolGuard(Strategy):
     enable_weekly_profit_lock: bool = True
     weekly_profit_target: float = 0.02
     weekly_lock_risk_scale: float = 0.35
+    weekly_chase_target: float = 0.0
+    weekly_chase_k: float = 0.0
+    weekly_chase_max_extra_exposure: float = 0.0
+    weekly_chase_start_weekday_utc: int = 4
+    fallback_floor_exposure: float = 0.0
+    fallback_trend_strength_min: float = 0.03
+    fallback_min_momentum_bps: float = 0.0
+    fallback_min_atr_bps: float = 2.0
     daily_loss_limit: float = 0.02
     kill_switch: float = 0.12
 
@@ -223,6 +231,59 @@ class PerpTrendVolGuard(Strategy):
             "score": float(abs(trend_strength) * max(abs(mom), 1e-6)),
         }
 
+    def _fallback_signal(self, *, df: pd.DataFrame) -> Optional[dict[str, float]]:
+        if df is None or len(df) < self.warmup_bars():
+            return None
+        if not df.index.is_monotonic_increasing:
+            df = df.sort_index()
+        close = pd.to_numeric(df.get("close"), errors="coerce").dropna()
+        if len(close) < self.warmup_bars():
+            return None
+        c = float(close.iloc[-1])
+        if c <= 0:
+            return None
+        atr = _atr(df, int(self.atr_window))
+        if atr is None or atr <= 0:
+            return None
+        atr_bps = float((atr / c) * 10_000.0)
+        if atr_bps < float(self.fallback_min_atr_bps):
+            return None
+        ema_fast = float(_ema(close, int(self.ema_fast)).iloc[-1])
+        ema_slow = float(_ema(close, int(self.ema_slow)).iloc[-1])
+        trend_strength = float((ema_fast - ema_slow) / atr)
+        if abs(trend_strength) < float(self.fallback_trend_strength_min):
+            return None
+        mom_base = float(close.iloc[-int(self.momentum_window_bars) - 1])
+        if mom_base <= 0:
+            return None
+        mom = float(math.log(c / mom_base))
+        mom_bps = float(mom * 10_000.0)
+        if abs(mom_bps) < float(self.fallback_min_momentum_bps):
+            return None
+        side = _sign(0.7 * trend_strength + 0.3 * mom)
+        if side == 0:
+            return None
+        return {
+            "side": float(side),
+            "atr_bps": float(atr_bps),
+            "trend_strength": float(trend_strength),
+            "momentum": float(mom),
+            "score": float(abs(trend_strength) + 0.5 * abs(mom)),
+        }
+
+    def _short_term_side(self, *, df: pd.DataFrame) -> int:
+        if df is None or df.empty:
+            return 0
+        close = pd.to_numeric(df.get("close"), errors="coerce").dropna()
+        look = int(max(2, int(self.momentum_window_bars) // 3))
+        if len(close) <= look:
+            return 0
+        c0 = float(close.iloc[-look - 1])
+        c1 = float(close.iloc[-1])
+        if c0 <= 0 or c1 <= 0:
+            return 0
+        return _sign(math.log(c1 / c0))
+
     def target_exposures(
         self, bars_by_symbol: dict[str, pd.DataFrame], state: StrategyState
     ) -> StrategyDecision:
@@ -307,51 +368,145 @@ class PerpTrendVolGuard(Strategy):
             sig = self._symbol_signal(df=bars_by_symbol.get(s), cost_rt_bps=cost_rt_bps)
             if sig is not None:
                 candidates[s] = sig
-        if not candidates:
-            return self._risk_off(symbols, reason="no_candidates", debug=debug)
 
         # Vol regime guard using first symbol.
         ms = symbols[0]
-        m_atr_bps = float(candidates.get(ms, {}).get("atr_bps", 0.0))
+        m_df = bars_by_symbol.get(ms)
+        m_atr_bps = 0.0
+        if m_df is not None and not m_df.empty:
+            m_close = pd.to_numeric(m_df.get("close"), errors="coerce").dropna()
+            if not m_close.empty:
+                m_px = float(m_close.iloc[-1])
+                m_atr = _atr(m_df, int(self.atr_window))
+                if m_px > 0 and m_atr is not None and m_atr > 0:
+                    m_atr_bps = float((float(m_atr) / float(m_px)) * 10_000.0)
+        if m_atr_bps <= 0.0 and ms in candidates:
+            m_atr_bps = float(candidates.get(ms, {}).get("atr_bps", 0.0))
         if m_atr_bps >= float(self.market_vol_off_bps):
             return self._risk_off(symbols, reason="market_vol_off", debug=debug)
         if m_atr_bps >= float(self.market_vol_reduce_bps):
             risk_scale *= 0.5
-
-        scored = sorted(candidates.items(), key=lambda kv: float(kv[1]["score"]), reverse=True)
-        selected = scored[: max(1, int(self.max_positions))]
-        denom = float(sum(max(0.0, float(v["score"])) for _, v in selected))
-        if denom <= 1e-12:
-            return self._risk_off(symbols, reason="bad_scores", debug=debug)
-
+        targets = {s: 0.0 for s in symbols}
         max_gross = float(self.max_gross_exposure) * float(risk_scale)
         max_gross = _clamp(max_gross, 0.0, float(self.max_gross_exposure))
         per_cap = float(self.max_per_symbol_exposure)
-        targets = {s: 0.0 for s in symbols}
 
-        for s, feat in selected:
-            score_w = max(0.0, float(feat["score"])) / denom
-            atr_bps = max(1e-6, float(feat["atr_bps"]))
-            # ATR stop-risk sizing plus volatility target.
-            risk_sizing = float(self.risk_budget) / max(
-                1e-6, float(self.stop_atr_mult) * (atr_bps / 10_000.0)
+        if candidates:
+            scored = sorted(candidates.items(), key=lambda kv: float(kv[1]["score"]), reverse=True)
+            selected = scored[: max(1, int(self.max_positions))]
+            denom = float(sum(max(0.0, float(v["score"])) for _, v in selected))
+            if denom <= 1e-12:
+                return self._risk_off(symbols, reason="bad_scores", debug=debug)
+
+            for s, feat in selected:
+                score_w = max(0.0, float(feat["score"])) / denom
+                atr_bps = max(1e-6, float(feat["atr_bps"]))
+                # ATR stop-risk sizing plus volatility target.
+                risk_sizing = float(self.risk_budget) / max(
+                    1e-6, float(self.stop_atr_mult) * (atr_bps / 10_000.0)
+                )
+                vol_sizing = float(self.target_vol_bps_per_bar) / atr_bps
+                raw = float(score_w) * min(float(risk_sizing), float(vol_sizing))
+                exp_abs = _clamp(raw, 0.0, per_cap)
+                side = _sign(float(feat["side"]))
+                targets[s] = float(side * exp_abs)
+
+            gross = float(sum(abs(v) for v in targets.values()))
+            if gross > max_gross and gross > 1e-12:
+                scale = float(max_gross / gross)
+                for s in list(targets.keys()):
+                    targets[s] = float(targets[s] * scale)
+        else:
+            floor_exp = _clamp(
+                float(self.fallback_floor_exposure) * float(risk_scale),
+                0.0,
+                float(self.max_per_symbol_exposure),
             )
-            vol_sizing = float(self.target_vol_bps_per_bar) / atr_bps
-            raw = float(score_w) * min(float(risk_sizing), float(vol_sizing))
-            exp_abs = _clamp(raw, 0.0, per_cap)
-            side = _sign(float(feat["side"]))
-            targets[s] = float(side * exp_abs)
-
-        gross = float(sum(abs(v) for v in targets.values()))
-        if gross > max_gross and gross > 1e-12:
-            scale = float(max_gross / gross)
-            for s in list(targets.keys()):
-                targets[s] = float(targets[s] * scale)
+            if floor_exp <= 0.0:
+                return self._risk_off(symbols, reason="no_candidates", debug=debug)
+            fallback: list[tuple[str, dict[str, float]]] = []
+            for s in symbols:
+                sig = self._fallback_signal(df=bars_by_symbol.get(s))
+                if sig is None:
+                    continue
+                side = _sign(float(sig.get("side", 0.0)))
+                if side < 0 and not bool(state.allow_short):
+                    continue
+                fallback.append((s, sig))
+            if not fallback:
+                return self._risk_off(symbols, reason="no_candidates", debug=debug)
+            fallback.sort(key=lambda item: float(item[1].get("score", 0.0)), reverse=True)
+            fs, f_sig = fallback[0]
+            f_side = _sign(float(f_sig.get("side", 0.0)))
+            targets[fs] = float(f_side) * float(floor_exp)
+            debug["fallback_floor"] = True
 
         min_exp = float(self.min_trade_notional_usd) / float(max_notional)
         for s in list(targets.keys()):
             if abs(float(targets[s])) < min_exp:
                 targets[s] = 0.0
+
+        # Optional end-of-week nudge: increase directional exposure only when the
+        # week is below a target and keep all existing gross/per-symbol limits.
+        chase_target = float(self.weekly_chase_target)
+        chase_k = float(self.weekly_chase_k)
+        chase_cap = _clamp(
+            float(self.weekly_chase_max_extra_exposure),
+            0.0,
+            float(self.max_per_symbol_exposure),
+        )
+        chase_start_wd = int(max(0, min(6, int(self.weekly_chase_start_weekday_utc))))
+        if (
+            chase_target > 0.0
+            and chase_k > 0.0
+            and chase_cap > 0.0
+            and int(ts.dayofweek) >= chase_start_wd
+            and float(week_ret) < chase_target
+        ):
+            deficit = float(chase_target - float(week_ret))
+            extra = _clamp(float(chase_k) * float(deficit), 0.0, chase_cap)
+            chase_symbol = None
+            chase_side = 0
+            if candidates:
+                ranked = sorted(candidates.items(), key=lambda kv: float(kv[1]["score"]), reverse=True)
+                if ranked:
+                    chase_symbol = str(ranked[0][0])
+                    chase_side = _sign(float(ranked[0][1].get("side", 0.0)))
+            if chase_symbol is None:
+                ranked_fb: list[tuple[str, float, int]] = []
+                for s in symbols:
+                    sig = self._fallback_signal(df=bars_by_symbol.get(s))
+                    if sig is None:
+                        continue
+                    ranked_fb.append(
+                        (
+                            s,
+                            float(sig.get("score", 0.0)),
+                            _sign(float(sig.get("side", 0.0))),
+                        )
+                    )
+                ranked_fb.sort(key=lambda x: float(x[1]), reverse=True)
+                if ranked_fb:
+                    chase_symbol = str(ranked_fb[0][0])
+                    chase_side = int(ranked_fb[0][2])
+            if chase_symbol is not None and chase_side == 0:
+                chase_side = self._short_term_side(df=bars_by_symbol.get(chase_symbol))
+            if chase_symbol is not None and chase_side != 0:
+                if chase_side < 0 and not bool(state.allow_short):
+                    chase_side = 1
+                cur = float(targets.get(chase_symbol, 0.0))
+                cur_abs = abs(cur)
+                new_abs = _clamp(cur_abs + float(extra), 0.0, float(self.max_per_symbol_exposure))
+                targets[chase_symbol] = float(chase_side) * float(new_abs)
+                gross = float(sum(abs(v) for v in targets.values()))
+                if gross > max_gross and gross > 1e-12:
+                    scale = float(max_gross / gross)
+                    for s in list(targets.keys()):
+                        targets[s] = float(targets[s] * scale)
+                debug["weekly_chase_deficit"] = float(deficit)
+                debug["weekly_chase_extra"] = float(extra)
+                debug["weekly_chase_symbol"] = str(chase_symbol)
+                debug["weekly_chase_side"] = int(chase_side)
 
         # Flip/hysteresis control and rebalance threshold.
         for s in symbols:

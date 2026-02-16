@@ -59,6 +59,7 @@ class TuiState:
     bar_timeframe: str = "1Min"
     alpaca_feed: str = "delayed_sip"
     paper_feed: str = "iex"
+    paper_execution_venue: str = "alpaca"
     strategy: str = "spy_open_close"
     fast_window: int = 10
     slow_window: int = 30
@@ -67,6 +68,9 @@ class TuiState:
     max_position_notional_usd: float = 10_000.0
     slippage_bps: float = 0.0
     taker_fee_bps: float = 0.0
+    coinbase_fee_model: bool = True
+    fixed_fee_per_contract_usd: float = 0.0
+    contract_size_units: float = 1.0
     allow_short: bool = False
     debug: bool = False
     paper_lookback_bars: int = 200
@@ -442,6 +446,69 @@ STRATEGY_PARAM_SPECS: dict[str, dict[str, type]] = {
         "weekly_heartbeat_hold_bars": int,
         "weekly_nudge_exposure": float,
         "max_flips_per_day": int,
+    },
+    "perp_quant_fusion": {
+        "atr_window": int,
+        "ema_fast": int,
+        "ema_slow": int,
+        "er_window": int,
+        "choppiness_window": int,
+        "breakout_window": int,
+        "breakout_buffer_bps": float,
+        "trend_z_min": float,
+        "er_min": float,
+        "er_exit_min": float,
+        "choppiness_max": float,
+        "choppiness_exit_max": float,
+        "min_atr_bps": float,
+        "edge_floor_bps": float,
+        "k_cost": float,
+        "slippage_bps": float,
+        "taker_fee_bps": float,
+        "risk_budget": float,
+        "stop_atr_mult": float,
+        "max_positions": int,
+        "max_gross_exposure": float,
+        "max_per_symbol_exposure": float,
+        "rebalance_exposure_threshold": float,
+        "min_trade_notional_usd": float,
+        "min_hold_bars": int,
+        "flip_confirm_bars": int,
+        "daily_loss_limit": float,
+        "kill_switch": float,
+        "enable_weekly_profit_lock": bool,
+        "weekly_profit_target": float,
+        "weekly_lock_risk_scale": float,
+        "enable_weekly_heartbeat": bool,
+        "heartbeat_weekday_utc": int,
+        "heartbeat_hour_utc": int,
+        "heartbeat_minute_utc": int,
+        "heartbeat_exposure": float,
+        "heartbeat_hold_bars": int,
+    },
+    "perp_regime_adaptive_trend_capture": {
+        "mom_horizon_a": int,
+        "mom_horizon_b": int,
+        "mom_horizon_c": int,
+        "ema_fast_regime": int,
+        "ema_slow_regime": int,
+        "bear_exit_bps": float,
+        "short_entry_bps": float,
+        "cooldown_bars": int,
+        "long_base_exposure": float,
+        "short_base_exposure": float,
+        "extreme_vol_scale": float,
+        "high_vol_scale": float,
+        "extreme_vol_rank": float,
+        "high_vol_rank": float,
+        "vol_lookback_bars": int,
+        "vol_regime_window": int,
+        "crash_threshold_bps": float,
+        "max_hold_bars": int,
+        "rebalance_exposure_threshold": float,
+        "daily_loss_limit": float,
+        "weekly_loss_limit": float,
+        "kill_switch": float,
     },
     "basis_carry": {
         "funding_ema_alpha": float,
@@ -824,6 +891,69 @@ STRATEGY_DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
         "weekly_nudge_exposure": 0.002,
         "max_flips_per_day": 3,
     },
+    "perp_quant_fusion": {
+        "atr_window": 14,
+        "ema_fast": 20,
+        "ema_slow": 60,
+        "er_window": 20,
+        "choppiness_window": 14,
+        "breakout_window": 20,
+        "breakout_buffer_bps": 2.0,
+        "trend_z_min": 0.20,
+        "er_min": 0.30,
+        "er_exit_min": 0.18,
+        "choppiness_max": 62.0,
+        "choppiness_exit_max": 68.0,
+        "min_atr_bps": 5.0,
+        "edge_floor_bps": 6.0,
+        "k_cost": 1.8,
+        "slippage_bps": 1.25,
+        "taker_fee_bps": 3.0,
+        "risk_budget": 0.02,
+        "stop_atr_mult": 2.2,
+        "max_positions": 3,
+        "max_gross_exposure": 1.0,
+        "max_per_symbol_exposure": 0.50,
+        "rebalance_exposure_threshold": 0.03,
+        "min_trade_notional_usd": 20.0,
+        "min_hold_bars": 3,
+        "flip_confirm_bars": 2,
+        "daily_loss_limit": 0.025,
+        "kill_switch": 0.12,
+        "enable_weekly_profit_lock": False,
+        "weekly_profit_target": 0.02,
+        "weekly_lock_risk_scale": 0.25,
+        "enable_weekly_heartbeat": False,
+        "heartbeat_weekday_utc": 0,
+        "heartbeat_hour_utc": 0,
+        "heartbeat_minute_utc": 5,
+        "heartbeat_exposure": 0.01,
+        "heartbeat_hold_bars": 1,
+    },
+    "perp_regime_adaptive_trend_capture": {
+        "mom_horizon_a": 168,
+        "mom_horizon_b": 504,
+        "mom_horizon_c": 1008,
+        "ema_fast_regime": 72,
+        "ema_slow_regime": 504,
+        "bear_exit_bps": 120.0,
+        "short_entry_bps": 300.0,
+        "cooldown_bars": 168,
+        "long_base_exposure": 0.55,
+        "short_base_exposure": 0.35,
+        "extreme_vol_scale": 0.40,
+        "high_vol_scale": 0.70,
+        "extreme_vol_rank": 0.85,
+        "high_vol_rank": 0.75,
+        "vol_lookback_bars": 120,
+        "vol_regime_window": 720,
+        "crash_threshold_bps": 350.0,
+        "max_hold_bars": 2016,
+        "rebalance_exposure_threshold": 0.02,
+        "daily_loss_limit": 0.05,
+        "weekly_loss_limit": 0.07,
+        "kill_switch": 0.25,
+    },
     "basis_carry": {
         "funding_ema_alpha": 0.20,
         "funding_entry_bps_per_day": 10.0,
@@ -953,6 +1083,11 @@ class AtlasTui(App):
         "/slip": "/slippage",
         "/fee": "/takerfee",
         "/taker_fee": "/takerfee",
+        "/coinbasefee": "/coinbasefees",
+        "/coinbase_fee": "/coinbasefees",
+        "/cbfees": "/coinbasefees",
+        "/fixed_fee": "/fixedfee",
+        "/contract_size": "/contractsize",
         "/allowshort": "/short",
         "/allow_short": "/short",
         "/paperlookbackbars": "/paperlookback",
@@ -997,11 +1132,15 @@ class AtlasTui(App):
         "/maxnotional",
         "/slippage",
         "/takerfee",
+        "/coinbasefees",
+        "/fixedfee",
+        "/contractsize",
         "/short",
         "/debug",
         "/data",
         "/feed",
         "/paperfeed",
+        "/papervenue",
         "/paperlookback",
         "/paperpoll",
         "/papermaxnotional",
@@ -1306,6 +1445,37 @@ class AtlasTui(App):
             except Exception:
                 self._write_log(f"preset profile ignored invalid taker_fee_bps: {taker_fee_raw!r}")
 
+        coinbase_fee_model_raw = profile.get("coinbase_fee_model")
+        if coinbase_fee_model_raw is not None:
+            value = self._profile_bool(coinbase_fee_model_raw, key="coinbase_fee_model")
+            if value is not None:
+                self.state.coinbase_fee_model = bool(value)
+                changed.append(f"coinbase_fee_model={str(value).lower()}")
+
+        fixed_fee_raw = profile.get("fixed_fee_per_contract_usd")
+        if fixed_fee_raw is not None:
+            try:
+                fixed_fee = float(fixed_fee_raw)
+                if fixed_fee < 0:
+                    raise ValueError("fixed_fee_per_contract_usd must be >= 0")
+                self.state.fixed_fee_per_contract_usd = fixed_fee
+                changed.append(f"fixed_fee_per_contract_usd={fixed_fee:g}")
+            except Exception:
+                self._write_log(
+                    f"preset profile ignored invalid fixed_fee_per_contract_usd: {fixed_fee_raw!r}"
+                )
+
+        contract_size_raw = profile.get("contract_size_units")
+        if contract_size_raw is not None:
+            try:
+                contract_size = float(contract_size_raw)
+                if contract_size <= 0:
+                    raise ValueError("contract_size_units must be > 0")
+                self.state.contract_size_units = contract_size
+                changed.append(f"contract_size_units={contract_size:g}")
+            except Exception:
+                self._write_log(f"preset profile ignored invalid contract_size_units: {contract_size_raw!r}")
+
         allow_short_raw = profile.get("allow_short")
         if allow_short_raw is not None:
             value = self._profile_bool(allow_short_raw, key="allow_short")
@@ -1344,6 +1514,18 @@ class AtlasTui(App):
                     changed.append(f"paper_lookback_bars={paper_lookback}")
             except Exception:
                 self._write_log(f"preset profile ignored invalid paper_lookback_bars: {paper_lookback_raw!r}")
+
+        paper_execution_raw = profile.get("paper_execution_venue", profile.get("papervenue"))
+        if paper_execution_raw is not None:
+            value = str(paper_execution_raw).strip().lower()
+            if value in {"alpaca", "coinbase"}:
+                self.state.paper_execution_venue = value
+                changed.append(f"paper_execution_venue={value}")
+                if value == "coinbase" and self.state.data_source != "coinbase":
+                    self.state.data_source = "coinbase"
+                    changed.append("data_source=coinbase")
+            else:
+                self._write_log(f"preset profile ignored invalid paper_execution_venue: {paper_execution_raw!r}")
 
         for bool_key in ("paper_regular_hours_only", "paper_allow_trading_when_closed", "paper_dry_run"):
             if bool_key not in profile:
@@ -1402,6 +1584,9 @@ class AtlasTui(App):
             "perp-flare": "perp_flare",
             "perp-hawk": "perp_hawk",
             "perp-scalp": "perp_scalp",
+            "perp-quant-fusion": "perp_quant_fusion",
+            "perp-regime-adaptive-trend-capture": "perp_regime_adaptive_trend_capture",
+            "perp-ratc": "perp_regime_adaptive_trend_capture",
             "basis-carry": "basis_carry",
             "cash-and-carry": "basis_carry",
             "hedge": "hedge",
@@ -1435,6 +1620,8 @@ class AtlasTui(App):
             "perp_flare": "perp-flare",
             "perp_hawk": "perp-hawk",
             "perp_scalp": "perp-scalp",
+            "perp_quant_fusion": "perp-quant-fusion",
+            "perp_regime_adaptive_trend_capture": "perp-regime-adaptive-trend-capture",
             "basis_carry": "basis-carry",
             "hedge": "hedge-implementation",
             "crypto_ensemble": "crypto-ensemble",
@@ -1546,12 +1733,21 @@ class AtlasTui(App):
         if mkt == Market.EQUITY:
             self.state.slippage_bps = 0.0
             self.state.taker_fee_bps = 0.0
+            self.state.coinbase_fee_model = False
+            self.state.fixed_fee_per_contract_usd = 0.0
+            self.state.contract_size_units = 1.0
         elif mkt == Market.CRYPTO:
             self.state.slippage_bps = 3.0
             self.state.taker_fee_bps = 25.0
+            self.state.coinbase_fee_model = False
+            self.state.fixed_fee_per_contract_usd = 0.0
+            self.state.contract_size_units = 1.0
         else:
             self.state.slippage_bps = 1.25
-            self.state.taker_fee_bps = 3.0
+            self.state.taker_fee_bps = 10.0
+            self.state.coinbase_fee_model = True
+            self.state.fixed_fee_per_contract_usd = 0.15
+            self.state.contract_size_units = 0.01
 
         if mkt == Market.EQUITY:
             self.state.paper_regular_hours_only = True
@@ -1559,6 +1755,13 @@ class AtlasTui(App):
         else:
             self.state.paper_regular_hours_only = False
             self.state.paper_allow_trading_when_closed = True
+
+        if mkt == Market.DERIVATIVES:
+            self.state.data_source = "coinbase"
+            self.state.paper_execution_venue = "coinbase"
+            self.state.paper_dry_run = True
+        elif mkt == Market.EQUITY and self.state.paper_execution_venue == "coinbase":
+            self.state.paper_execution_venue = "alpaca"
 
         strategy = self._canonicalize_strategy_name(self.state.strategy)
         self._ensure_strategy_params(strategy)
@@ -1599,6 +1802,29 @@ class AtlasTui(App):
         self.state.symbols = ",".join(current_symbols)
         self._render_settings()
 
+    def _coinbase_fee_model_active(
+        self,
+        *,
+        market: Optional[str] = None,
+        data_source: Optional[str] = None,
+        execution_venue: Optional[str] = None,
+        enabled: Optional[bool] = None,
+    ) -> bool:
+        mkt = parse_market(market if market is not None else self.state.market)
+        ds = str(data_source if data_source is not None else self.state.data_source).strip().lower()
+        if enabled is None:
+            enabled = bool(self.state.coinbase_fee_model)
+        if not bool(enabled):
+            return False
+        if mkt != Market.DERIVATIVES:
+            return False
+        if ds != "coinbase":
+            return False
+        if execution_venue is None:
+            return True
+        venue = str(execution_venue).strip().lower()
+        return venue == "coinbase"
+
     def _arg_options(self, command: str) -> list[str]:
         cmd = self._canonicalize_command(command)
         if cmd == "/paper":
@@ -1613,6 +1839,14 @@ class AtlasTui(App):
             return ["1000", "5000", "10000", "25000", "100000"]
         if cmd == "/slippage":
             return ["0", "0.5", "1.25", "2.0", "5.0"]
+        if cmd == "/takerfee":
+            return ["3.0", "6.0", "10.0", "12.5"]
+        if cmd == "/coinbasefees":
+            return ["true", "false"]
+        if cmd == "/fixedfee":
+            return ["0.00", "0.10", "0.15", "0.20"]
+        if cmd == "/contractsize":
+            return ["1.0", "0.1", "0.01", "0.001"]
         if cmd == "/short":
             return ["true", "false"]
         if cmd == "/debug":
@@ -1621,6 +1855,8 @@ class AtlasTui(App):
             return ["sample", "csv", "alpaca", "coinbase"]
         if cmd in {"/feed", "/paperfeed"}:
             return ["iex", "delayed_sip", "sip"]
+        if cmd == "/papervenue":
+            return ["alpaca", "coinbase"]
         if cmd == "/paperlookback":
             return ["50", "100", "200", "500"]
         if cmd == "/paperpoll":
@@ -1860,8 +2096,8 @@ class AtlasTui(App):
                 "/bar <1Min|5Min|15Min|30Min|60Min|4H|6H|1D>, /algorithm <name>, /data <sample|csv|alpaca|coinbase>, "
                 "/tune start|stop|apply|trials|jobs|seed|train|validate|test|step|drift|margin, "
                 "/param <key> <value>, /params, /preset list|load <name|path>, "
-                "/fast <int>, /slow <int>, /cash <usd> (/initialcash <usd>), /maxnotional <usd>, /slippage <bps>, /takerfee <bps>, /short <true|false>, /debug <true|false>, "
-                "/feed <iex|delayed_sip|sip>, /paperfeed <iex|delayed_sip|sip>, /csv <path>, "
+                "/fast <int>, /slow <int>, /cash <usd> (/initialcash <usd>), /maxnotional <usd>, /slippage <bps>, /takerfee <bps>, /coinbasefees <true|false>, /fixedfee <usd_per_contract>, /contractsize <units>, /short <true|false>, /debug <true|false>, "
+                "/feed <iex|delayed_sip|sip>, /paperfeed <iex|delayed_sip|sip>, /papervenue <alpaca|coinbase>, /csv <path>, "
                 "/paperlookback <bars>, /paperpoll <seconds>, /papermaxnotional <usd>, "
                 "/paperclosed <true|false>, /paperrth <true|false>, /paperlimitbps <float>, /paperdry <true|false>, "
                 "/symbol <SPY>, /symbols <SPY,QQQ>, /start <iso>, /end <iso>, /save [path], /load [path]"
@@ -1939,6 +2175,24 @@ class AtlasTui(App):
                 self._write_log("paperfeed must be one of: iex | delayed_sip | sip")
                 return
             self.state.paper_feed = value
+            self._render_settings()
+            return
+
+        if cmd == "/papervenue" and args:
+            value = args[0].lower()
+            if value not in {"alpaca", "coinbase"}:
+                self._write_log("papervenue must be alpaca|coinbase")
+                return
+            if value == "coinbase" and parse_market(self.state.market) == Market.EQUITY:
+                self._write_log("papervenue=coinbase supports crypto|derivatives only")
+                return
+            self.state.paper_execution_venue = value
+            if value == "coinbase" and self.state.data_source != "coinbase":
+                self.state.data_source = "coinbase"
+                self._write_log("data source set to coinbase for paper venue compatibility")
+            if value == "coinbase" and not self.state.paper_dry_run:
+                self.state.paper_dry_run = True
+                self._write_log("paperdry set to true for coinbase safety default")
             self._render_settings()
             return
 
@@ -2061,6 +2315,64 @@ class AtlasTui(App):
                     "this takerfee setting affects the backtest engine only"
                 )
 
+            self._render_settings()
+            return
+
+        if cmd == "/coinbasefees" and not args:
+            active = self._coinbase_fee_model_active()
+            self._write_log(
+                "coinbase fee model="
+                + ("on" if self.state.coinbase_fee_model else "off")
+                + (" (active)" if active else " (inactive)")
+            )
+            return
+
+        if cmd == "/coinbasefees" and args:
+            value = _parse_bool_arg(args[0])
+            if value is None:
+                self._write_log("coinbasefees must be true|false")
+                return
+            self.state.coinbase_fee_model = bool(value)
+            active = self._coinbase_fee_model_active()
+            self._render_settings()
+            self._write_log(
+                "coinbase fee model "
+                + ("enabled" if self.state.coinbase_fee_model else "disabled")
+                + ("" if active else " (inactive unless market=derivatives, data=coinbase, papervenue=coinbase)")
+            )
+            return
+
+        if cmd == "/fixedfee" and not args:
+            self._write_log(f"fixedfee={self.state.fixed_fee_per_contract_usd:.4f} usd/contract")
+            return
+
+        if cmd == "/fixedfee" and args:
+            try:
+                value = float(args[0])
+            except ValueError:
+                self._write_log("fixedfee must be a number (USD per contract)")
+                return
+            if value < 0:
+                self._write_log("fixedfee must be >= 0")
+                return
+            self.state.fixed_fee_per_contract_usd = float(value)
+            self._render_settings()
+            return
+
+        if cmd == "/contractsize" and not args:
+            self._write_log(f"contractsize={self.state.contract_size_units:.6g}")
+            return
+
+        if cmd == "/contractsize" and args:
+            try:
+                value = float(args[0])
+            except ValueError:
+                self._write_log("contractsize must be a number (underlying units per contract)")
+                return
+            if value <= 0:
+                self._write_log("contractsize must be > 0")
+                return
+            self.state.contract_size_units = float(value)
             self._render_settings()
             return
 
@@ -2587,6 +2899,19 @@ class AtlasTui(App):
             table.add_row("params", self._format_strategy_params(self.state.strategy, params))
         table.add_row("slippage_bps", f"{self.state.slippage_bps:.2f}")
         table.add_row("taker_fee_bps", f"{self.state.taker_fee_bps:.2f}")
+        coinbase_fee_active = self._coinbase_fee_model_active()
+        table.add_row(
+            "coinbase_fee_model",
+            (
+                Text("on(active)", style="green")
+                if coinbase_fee_active
+                else Text("on(inactive)", style="yellow")
+                if self.state.coinbase_fee_model
+                else Text("off", style="red")
+            ),
+        )
+        table.add_row("fixed_fee_per_contract_usd", f"{self.state.fixed_fee_per_contract_usd:.4f}")
+        table.add_row("contract_size_units", f"{self.state.contract_size_units:.6g}")
         table.add_row(
             "allow_short",
             Text("true", style="green") if self.state.allow_short else Text("false", style="red"),
@@ -2610,6 +2935,8 @@ class AtlasTui(App):
         table.add_row("paper_lookback", str(self.state.paper_lookback_bars))
         table.add_row("paper_poll_s", str(self.state.paper_poll_seconds))
         table.add_row("paper_max_notional", f"{self.state.paper_max_position_notional_usd:.2f}")
+        table.add_row("paper_data_source", self.state.data_source)
+        table.add_row("paper_venue", self.state.paper_execution_venue)
         table.add_row("paper_feed", self.state.paper_feed)
         table.add_row("paper_rth_only", str(self.state.paper_regular_hours_only))
         table.add_row("paper_when_closed", str(self.state.paper_allow_trading_when_closed))
@@ -2777,10 +3104,13 @@ class AtlasTui(App):
         )
 
         mkt = parse_market(self.state.market)
-        if mkt == Market.CRYPTO:
+        if self.state.data_source == "coinbase":
+            bars_label = "Coinbase public bars"
+        elif mkt == Market.CRYPTO:
             bars_label = "Alpaca crypto (paper_feed ignored)"
         else:
             bars_label = f"Alpaca stocks (feed={self.state.paper_feed})"
+        venue_label = f"Execution: {self.state.paper_execution_venue}"
 
         reason_style = "cyan"
         if reason in {"enter", "hold"}:
@@ -2878,7 +3208,7 @@ class AtlasTui(App):
         reason_display = reason.replace("_", " ").upper()
         decision_banner.add_row(
             Text(f"Reason: {reason_display}", style=f"bold {reason_style}"),
-            Text(f"Bars: {bars_label}", style="dim"),
+            Text(f"Bars: {bars_label} | {venue_label}", style="dim"),
         )
         if decision_ts is not None:
             decision_banner.add_row(
@@ -3815,12 +4145,34 @@ class AtlasTui(App):
 
                 self._tune_events.put(("status", "tuning (walk-forward)…"))
 
+                coinbase_fee_enabled = bool(snapshot.get("coinbase_fee_model", True))
+                coinbase_fee_active = self._coinbase_fee_model_active(
+                    market=mkt.value,
+                    data_source=data_source,
+                    execution_venue="coinbase",
+                    enabled=coinbase_fee_enabled,
+                )
+                fixed_fee_per_contract = (
+                    float(snapshot.get("fixed_fee_per_contract_usd", 0.0))
+                    if coinbase_fee_active
+                    else 0.0
+                )
+                contract_size_units = (
+                    float(snapshot.get("contract_size_units", 1.0))
+                    if coinbase_fee_active
+                    else 1.0
+                )
+                if contract_size_units <= 0.0:
+                    contract_size_units = 1.0
+
                 backtest_cfg = BacktestConfig(
                     symbols=symbols,
                     initial_cash=float(snapshot.get("initial_cash", 100_000.0)),
                     max_position_notional_usd=float(snapshot.get("max_position_notional_usd", 10_000.0)),
                     slippage_bps=float(snapshot.get("slippage_bps", 0.0)),
                     taker_fee_bps=float(snapshot.get("taker_fee_bps", 0.0)),
+                    fixed_fee_per_contract_usd=float(fixed_fee_per_contract),
+                    contract_size_units=float(contract_size_units),
                     allow_short=bool(snapshot.get("allow_short", False)),
                 )
                 tune_cfg = TuneConfig(
@@ -4047,12 +4399,34 @@ class AtlasTui(App):
                     params=dict((snapshot.get("strategy_params") or {}).get(strategy, {})),
                 )
 
+                coinbase_fee_enabled = bool(snapshot.get("coinbase_fee_model", True))
+                coinbase_fee_active = self._coinbase_fee_model_active(
+                    market=mkt.value,
+                    data_source=data_source,
+                    execution_venue="coinbase",
+                    enabled=coinbase_fee_enabled,
+                )
+                fixed_fee_per_contract = (
+                    float(snapshot.get("fixed_fee_per_contract_usd", 0.0))
+                    if coinbase_fee_active
+                    else 0.0
+                )
+                contract_size_units = (
+                    float(snapshot.get("contract_size_units", 1.0))
+                    if coinbase_fee_active
+                    else 1.0
+                )
+                if contract_size_units <= 0.0:
+                    contract_size_units = 1.0
+
                 cfg = BacktestConfig(
                     symbols=symbols,
                     initial_cash=float(snapshot.get("initial_cash", 100_000.0)),
                     max_position_notional_usd=float(snapshot.get("max_position_notional_usd", 10_000.0)),
                     slippage_bps=float(snapshot.get("slippage_bps", 0.0)),
                     taker_fee_bps=float(snapshot.get("taker_fee_bps", 0.0)),
+                    fixed_fee_per_contract_usd=float(fixed_fee_per_contract),
+                    contract_size_units=float(contract_size_units),
                     allow_short=bool(snapshot.get("allow_short", False)),
                 )
 
@@ -4103,9 +4477,14 @@ class AtlasTui(App):
                     summary.add_row("trade_debug", str(run_dir / "trade_debug.jsonl"))
                 summary.add_row("symbols", ",".join(symbols))
                 summary.add_row("data", f"{data_source} ({data_hint})")
+                requested_start = start_dt.isoformat() if start_dt else common_index[0].isoformat()
+                requested_end = end_dt.isoformat() if end_dt else common_index[-1].isoformat()
+                observed_start = common_index[0].isoformat()
+                observed_end = common_index[-1].isoformat()
+                summary.add_row("requested_window", f"{requested_start} -> {requested_end}")
                 summary.add_row(
-                    "window",
-                    f"{(start_dt.isoformat() if start_dt else common_index[0].isoformat())} -> {(end_dt.isoformat() if end_dt else common_index[-1].isoformat())}  |  bars={len(common_index)}  sessions={sessions}  bar={bar_minutes:.2f}m",
+                    "observed_data_window",
+                    f"{observed_start} -> {observed_end}  |  bars={len(common_index)}  sessions={sessions}  bar={bar_minutes:.2f}m",
                 )
                 summary.add_row("duration", str(duration))
                 strategy_name = str(snapshot.get("strategy", strategy))
@@ -4124,6 +4503,9 @@ class AtlasTui(App):
                             f"initial_cash={cfg.initial_cash:.2f}",
                             f"max_notional={cfg.max_position_notional_usd:.2f}",
                             f"slippage_bps={cfg.slippage_bps:.2f}",
+                            f"taker_fee_bps={cfg.taker_fee_bps:.2f}",
+                            f"fixed_fee_per_contract_usd={cfg.fixed_fee_per_contract_usd:.4f}",
+                            f"contract_size_units={cfg.contract_size_units:.6g}",
                             f"allow_short={cfg.allow_short}",
                         ]
                     ),
@@ -4235,12 +4617,29 @@ class AtlasTui(App):
             params=self.state.strategy_params.get(self.state.strategy),
         )
 
+        coinbase_fee_active = self._coinbase_fee_model_active(
+            market=mkt.value,
+            data_source=self.state.data_source,
+            execution_venue="coinbase",
+            enabled=self.state.coinbase_fee_model,
+        )
+        fixed_fee_per_contract = (
+            float(self.state.fixed_fee_per_contract_usd) if coinbase_fee_active else 0.0
+        )
+        contract_size_units = (
+            float(self.state.contract_size_units) if coinbase_fee_active else 1.0
+        )
+        if contract_size_units <= 0.0:
+            contract_size_units = 1.0
+
         cfg = BacktestConfig(
             symbols=symbols,
             initial_cash=self.state.initial_cash,
             max_position_notional_usd=self.state.max_position_notional_usd,
             slippage_bps=self.state.slippage_bps,
             taker_fee_bps=self.state.taker_fee_bps,
+            fixed_fee_per_contract_usd=float(fixed_fee_per_contract),
+            contract_size_units=float(contract_size_units),
             allow_short=self.state.allow_short,
         )
 
@@ -4281,9 +4680,14 @@ class AtlasTui(App):
             summary.add_row("trade_debug", str(run_dir / "trade_debug.jsonl"))
         summary.add_row("symbols", ",".join(symbols))
         summary.add_row("data", f"{self.state.data_source} ({data_hint})")
+        requested_start = start_dt.isoformat() if start_dt else common_index[0].isoformat()
+        requested_end = end_dt.isoformat() if end_dt else common_index[-1].isoformat()
+        observed_start = common_index[0].isoformat()
+        observed_end = common_index[-1].isoformat()
+        summary.add_row("requested_window", f"{requested_start} -> {requested_end}")
         summary.add_row(
-            "window",
-            f"{(start_dt.isoformat() if start_dt else common_index[0].isoformat())} -> {(end_dt.isoformat() if end_dt else common_index[-1].isoformat())}  |  bars={len(common_index)}  sessions={sessions}  bar={bar_minutes:.2f}m",
+            "observed_data_window",
+            f"{observed_start} -> {observed_end}  |  bars={len(common_index)}  sessions={sessions}  bar={bar_minutes:.2f}m",
         )
         summary.add_row("duration", str(duration))
         summary.add_row(
@@ -4303,6 +4707,8 @@ class AtlasTui(App):
                     f"max_notional={cfg.max_position_notional_usd:.2f}",
                     f"slippage_bps={cfg.slippage_bps:.2f}",
                     f"taker_fee_bps={cfg.taker_fee_bps:.2f}",
+                    f"fixed_fee_per_contract_usd={cfg.fixed_fee_per_contract_usd:.4f}",
+                    f"contract_size_units={cfg.contract_size_units:.6g}",
                     f"allow_short={cfg.allow_short}",
                 ]
             ),
@@ -4367,8 +4773,33 @@ class AtlasTui(App):
         if self._paper_thread is not None:
             self._write_log("paper loop already running")
             return
-        settings = get_alpaca_settings(require_keys=True)
+
         mkt = parse_market(self.state.market)
+        data_source = str(self.state.data_source or "alpaca").strip().lower()
+        execution_venue = str(self.state.paper_execution_venue or "alpaca").strip().lower()
+        if data_source not in {"alpaca", "coinbase"}:
+            self._write_log("paper data source must be alpaca|coinbase")
+            return
+        if execution_venue not in {"alpaca", "coinbase"}:
+            self._write_log("paper execution venue must be alpaca|coinbase")
+            return
+        if mkt == Market.DERIVATIVES and data_source != "coinbase":
+            self._write_log("market=derivatives requires data_source=coinbase")
+            return
+        if mkt == Market.DERIVATIVES and execution_venue != "coinbase":
+            self._write_log("market=derivatives requires papervenue=coinbase")
+            return
+        if execution_venue == "coinbase" and mkt == Market.EQUITY:
+            self._write_log("papervenue=coinbase supports crypto|derivatives only")
+            return
+        if execution_venue == "coinbase" and data_source != "coinbase":
+            self._write_log("papervenue=coinbase currently requires data_source=coinbase")
+            return
+
+        settings = None
+        if data_source == "alpaca" or execution_venue == "alpaca":
+            settings = get_alpaca_settings(require_keys=True)
+
         run_dir = (
             Path("outputs")
             / "paper"
@@ -4385,6 +4816,9 @@ class AtlasTui(App):
         placeholder.add_row("run_dir", str(run_dir))
         placeholder.add_row("market", mkt.value)
         placeholder.add_row("symbols", self.state.symbols)
+        placeholder.add_row("data_source", data_source)
+        placeholder.add_row("execution_venue", execution_venue)
+        placeholder.add_row("dry_run", str(self.state.paper_dry_run).lower())
         placeholder.add_row("bar_timeframe", self.state.bar_timeframe)
         placeholder.add_row("strategy", self.state.strategy)
         results = self.query_one("#results", Static)
@@ -4405,15 +4839,48 @@ class AtlasTui(App):
             slow_window=self.state.slow_window,
             params=self.state.strategy_params.get(self.state.strategy),
         )
+        warmup_bars = int(max(1, int(strat.warmup_bars())))
+        recommended_paper_lookback = warmup_bars
+        if canonical_strategy == "perp_regime_adaptive_trend_capture":
+            # RATC is intentionally low-frequency and uses long lookbacks.
+            # Keep extra history to avoid under-warm starts from 1H polling noise.
+            recommended_paper_lookback = max(recommended_paper_lookback, 1000)
+        if int(self.state.paper_lookback_bars) < int(recommended_paper_lookback):
+            prev = int(self.state.paper_lookback_bars)
+            self.state.paper_lookback_bars = int(recommended_paper_lookback)
+            self._write_log(
+                f"paperlookback auto-raised {prev} -> {self.state.paper_lookback_bars} "
+                f"(strategy warmup={warmup_bars})"
+            )
+
+        coinbase_fee_active = self._coinbase_fee_model_active(
+            market=mkt.value,
+            data_source=data_source,
+            execution_venue=execution_venue,
+            enabled=self.state.coinbase_fee_model,
+        )
+        fixed_fee_per_contract = (
+            float(self.state.fixed_fee_per_contract_usd) if coinbase_fee_active else 0.0
+        )
+        contract_size_units = (
+            float(self.state.contract_size_units) if coinbase_fee_active else 1.0
+        )
+        if contract_size_units <= 0.0:
+            contract_size_units = 1.0
         cfg = PaperConfig(
             symbols=symbols,
             bar_timeframe=self.state.bar_timeframe,
+            data_source=data_source,
+            execution_venue=execution_venue,
             alpaca_feed=self.state.paper_feed,
             lookback_bars=self.state.paper_lookback_bars,
             poll_seconds=self.state.paper_poll_seconds,
+            initial_cash_usd=float(self.state.initial_cash),
             max_position_notional_usd=self.state.paper_max_position_notional_usd,
             slippage_bps=float(self.state.slippage_bps),
             taker_fee_bps=float(self.state.taker_fee_bps),
+            fixed_fee_per_contract_usd=float(fixed_fee_per_contract),
+            contract_size_units=float(contract_size_units),
             allow_short=self.state.allow_short,
             regular_hours_only=self.state.paper_regular_hours_only,
             allow_trading_when_closed=self.state.paper_allow_trading_when_closed,

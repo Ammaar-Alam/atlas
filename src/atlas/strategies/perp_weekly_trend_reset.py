@@ -47,6 +47,28 @@ def _utc_week_key(ts: pd.Timestamp) -> tuple[int, int]:
     return int(iso.year), int(iso.week)
 
 
+def _estimate_bars_per_day(index: pd.Index, *, default: int = 288) -> int:
+    """
+    Estimate bars/day from timestamp spacing so the strategy behaves consistently
+    across 5m/15m/1h/4h datasets.
+    """
+    try:
+        ts = pd.DatetimeIndex(index)
+        if len(ts) < 4:
+            return int(default)
+        # Use recent spacing for robustness to older data gaps.
+        deltas = ts.to_series().diff().dropna().dt.total_seconds()
+        if deltas.empty:
+            return int(default)
+        step_s = float(deltas.tail(32).median())
+        if not np.isfinite(step_s) or step_s <= 0:
+            return int(default)
+        bars = int(round(86_400.0 / step_s))
+        return int(max(1, min(10_000, bars)))
+    except Exception:
+        return int(default)
+
+
 def _max_notional_for_liq_buffer(
     *,
     equity_alloc: float,
@@ -151,8 +173,10 @@ class PerpWeeklyTrendReset(Strategy):
             ts = ts.tz_convert("UTC")
         if int(ts.dayofweek) != int(self.rebalance_weekday_utc):
             return False
-        if int(ts.hour) != int(self.rebalance_hour_utc):
+        if int(ts.hour) < int(self.rebalance_hour_utc):
             return False
+        if int(ts.hour) > int(self.rebalance_hour_utc):
+            return True
         return int(ts.minute) >= int(self.rebalance_minute_utc)
 
     def _trend_dir(self, close: pd.Series) -> tuple[int, float, int]:
@@ -163,7 +187,7 @@ class PerpWeeklyTrendReset(Strategy):
         if len(close) < 3:
             return 0, 0.0, 0
 
-        bars_per_day = 288
+        bars_per_day = _estimate_bars_per_day(close.index, default=288)
         lb = int(max(2, int(self.lookback_days) * bars_per_day))
         lb = min(lb, int(len(close) - 2))
         if lb < 2:

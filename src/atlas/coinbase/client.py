@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import base64
+import json
 import random
+import secrets
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -29,24 +33,119 @@ class Product:
 
 class CoinbaseClient:
     """
-    Minimal Coinbase Advanced Trade client for public market-data endpoints.
+    Minimal Coinbase Advanced Trade client.
+
+    - Public endpoints are used for market data.
+    - Private endpoints are authenticated with short-lived JWT bearer tokens.
 
     Important: Coinbase futures/perps often use contract-style `product_id` values
     (e.g. "BIP-20DEC30-CDE") even if we refer to them internally as "BTC-PERP".
     This client resolves common aliases like "BTC-PERP" -> the current Coinbase
-    `product_id` for "BTC PERP" via the public products endpoint.
+    `product_id` for "BTC PERP" via the products endpoint.
     """
 
     ADVANCED_TRADE_API_URL = "https://api.coinbase.com/api/v3"
+    ADVANCED_TRADE_HOST = "api.coinbase.com"
 
     def __init__(self, settings: Optional[CoinbaseSettings] = None):
         self.settings = settings or get_coinbase_settings()
         self.session = requests.Session()
         self._resolved_product_ids: dict[tuple[str, str], str] = {}
 
-    def _request_public(self, method: str, endpoint: str, params: Optional[dict] = None) -> Any:
-        url = f"{self.ADVANCED_TRADE_API_URL}{endpoint}"
-        headers = {"Accept": "application/json"}
+    @staticmethod
+    def _b64url(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
+
+    def _normalized_endpoint(self, endpoint: str) -> str:
+        ep = str(endpoint or "").strip()
+        if not ep:
+            raise ValueError("endpoint is required")
+        if ep.startswith("http://") or ep.startswith("https://"):
+            raise ValueError("endpoint must be a relative API path")
+        if not ep.startswith("/"):
+            ep = f"/{ep}"
+        if ep.startswith("/api/v3/"):
+            return ep
+        return f"/api/v3{ep}"
+
+    def _jwt_token(self, *, method: str, endpoint: str) -> str:
+        key_id = (self.settings.api_key or "").strip()
+        secret_raw = (self.settings.api_secret or "").strip()
+
+        if not key_id or not secret_raw:
+            raise RuntimeError(
+                "missing coinbase api credentials: set COINBASE_API_KEY and COINBASE_API_SECRET in .env"
+            )
+
+        # Handle secrets injected with escaped newlines.
+        if "\\n" in secret_raw and "\n" not in secret_raw:
+            secret_raw = secret_raw.replace("\\n", "\n")
+
+        try:
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import ec
+            from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "Coinbase private API auth requires 'cryptography'. Install it (e.g. `pip install cryptography`)."
+            ) from exc
+
+        endpoint_path = self._normalized_endpoint(endpoint)
+        now = int(time.time())
+
+        payload = {
+            "sub": key_id,
+            "iss": "cdp",
+            "nbf": now,
+            "exp": now + 120,
+            "uri": f"{method.upper()} {self.ADVANCED_TRADE_HOST}{endpoint_path}",
+        }
+        header = {
+            "alg": "ES256",
+            "kid": key_id,
+            "nonce": secrets.token_hex(),
+            "typ": "JWT",
+        }
+
+        encoded_header = self._b64url(
+            json.dumps(header, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        )
+        encoded_payload = self._b64url(
+            json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        )
+        signing_input = f"{encoded_header}.{encoded_payload}".encode("utf-8")
+
+        try:
+            private_key = serialization.load_pem_private_key(secret_raw.encode("utf-8"), password=None)
+        except ValueError as exc:
+            raise RuntimeError(
+                "invalid COINBASE_API_SECRET format: expected an EC private key PEM"
+            ) from exc
+
+        der_signature = private_key.sign(signing_input, ec.ECDSA(hashes.SHA256()))
+        r, s = decode_dss_signature(der_signature)
+        raw_signature = r.to_bytes(32, byteorder="big") + s.to_bytes(32, byteorder="big")
+        encoded_signature = self._b64url(raw_signature)
+
+        return f"{encoded_header}.{encoded_payload}.{encoded_signature}"
+
+    def _request(
+        self,
+        method: str,
+        endpoint: str,
+        *,
+        params: Optional[dict[str, Any]] = None,
+        json_body: Optional[dict[str, Any]] = None,
+        private: bool,
+    ) -> Any:
+        endpoint = self._normalized_endpoint(endpoint)
+        url = f"https://{self.ADVANCED_TRADE_HOST}{endpoint}"
+        headers: dict[str, str] = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        if private:
+            headers["Authorization"] = f"Bearer {self._jwt_token(method=method, endpoint=endpoint)}"
 
         retryable_statuses = {429, 500, 502, 503, 504}
         last_response: Optional[requests.Response] = None
@@ -55,7 +154,14 @@ class CoinbaseClient:
         max_attempts = 8
         for attempt in range(1, max_attempts + 1):
             try:
-                resp = self.session.request(method, url, headers=headers, params=params, timeout=30)
+                resp = self.session.request(
+                    method=method,
+                    url=url,
+                    headers=headers,
+                    params=params,
+                    json=json_body,
+                    timeout=30,
+                )
                 last_response = resp
 
                 if resp.status_code in retryable_statuses:
@@ -83,6 +189,8 @@ class CoinbaseClient:
                     continue
 
                 resp.raise_for_status()
+                if not resp.text.strip():
+                    return {}
                 return resp.json()
             except requests.HTTPError as exc:
                 body = getattr(exc.response, "text", "") if getattr(exc, "response", None) else ""
@@ -117,6 +225,30 @@ class CoinbaseClient:
 
         raise RuntimeError(f"Coinbase request failed: {method} {url}")
 
+    def _request_public(
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[dict[str, Any]] = None,
+    ) -> Any:
+        return self._request(method, endpoint, params=params, private=False)
+
+    def _request_private(
+        self,
+        method: str,
+        endpoint: str,
+        *,
+        params: Optional[dict[str, Any]] = None,
+        json_body: Optional[dict[str, Any]] = None,
+    ) -> Any:
+        return self._request(
+            method,
+            endpoint,
+            params=params,
+            json_body=json_body,
+            private=True,
+        )
+
     def list_products(self, product_type: str = "FUTURE") -> list[Product]:
         """
         List available products (public endpoint).
@@ -142,6 +274,21 @@ class CoinbaseClient:
                 )
             )
         return products
+
+    def get_product(self, product_id: str) -> dict[str, Any]:
+        """
+        Fetch full product metadata for a concrete Coinbase product id.
+        """
+        pid = str(product_id or "").strip().upper()
+        if not pid:
+            raise ValueError("product_id is required")
+        response = self._request_public("GET", f"/brokerage/market/products/{pid}")
+        if isinstance(response, dict) and response.get("product_id"):
+            return response
+        product = response.get("product")
+        if isinstance(product, dict):
+            return product
+        return {}
 
     def resolve_product_id(self, symbol: str, *, product_type: str) -> str:
         """
@@ -224,7 +371,8 @@ class CoinbaseClient:
         max_candles = 300
         chunk_size = timedelta(seconds=delta_seconds * max_candles)
 
-        inferred_product_type = "FUTURE" if (product_id or "").upper().endswith("-PERP") else "SPOT"
+        upper = (product_id or "").upper()
+        inferred_product_type = "FUTURE" if (upper.endswith("-PERP") or upper.endswith("-CDE")) else "SPOT"
         resolved_product_id = self.resolve_product_id(product_id, product_type=inferred_product_type)
         if resolved_product_id != (product_id or ""):
             logger.info("Resolved Coinbase product %s -> %s", product_id, resolved_product_id)
@@ -283,3 +431,37 @@ class CoinbaseClient:
         df.sort_index(inplace=True)
         df = df[~df.index.duplicated(keep="last")]
         return df[["open", "high", "low", "close", "volume"]].copy()
+
+    def create_market_order(
+        self,
+        *,
+        product_id: str,
+        side: str,
+        qty: float,
+        client_order_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        if qty <= 0:
+            raise ValueError("qty must be > 0")
+        side_u = str(side or "").strip().upper()
+        if side_u not in {"BUY", "SELL"}:
+            raise ValueError("side must be BUY or SELL")
+
+        base_size = f"{float(qty):.12f}".rstrip("0").rstrip(".")
+        body = {
+            "client_order_id": client_order_id or str(uuid.uuid4()),
+            "product_id": str(product_id).strip().upper(),
+            "side": side_u,
+            "order_configuration": {
+                "market_market_ioc": {
+                    "base_size": base_size,
+                }
+            },
+        }
+        return self._request_private("POST", "/brokerage/orders", json_body=body)
+
+    def get_order(self, order_id: str) -> dict[str, Any]:
+        response = self._request_private("GET", f"/brokerage/orders/historical/{order_id}")
+        order = response.get("order")
+        if isinstance(order, dict):
+            return order
+        return {}

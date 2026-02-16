@@ -45,6 +45,9 @@ class EvaluationConfig:
     prewarm: str = "90d"
     baseline_slippage_bps: float = 3.0
     baseline_taker_fee_bps: float = 25.0
+    use_coinbase_fee_model: bool = True
+    coinbase_fixed_fee_per_contract_usd: float = 0.15
+    coinbase_contract_size_units: float = 0.01
     stress_slippage_grid: tuple[float, ...] = (3.0, 5.0, 8.0)
     stress_taker_fee_grid: tuple[float, ...] = (25.0, 40.0, 60.0)
     stress_min_mean_return: float = -0.0025
@@ -480,6 +483,20 @@ def _run_candidate_baseline(
     market = parse_market(spec.market)
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    coinbase_fee_active = bool(
+        cfg.use_coinbase_fee_model
+        and market == Market.DERIVATIVES
+        and str(source_used).strip().lower() == "coinbase"
+    )
+    fixed_fee_per_contract_usd = (
+        float(cfg.coinbase_fixed_fee_per_contract_usd) if coinbase_fee_active else 0.0
+    )
+    contract_size_units = (
+        float(cfg.coinbase_contract_size_units) if coinbase_fee_active else 1.0
+    )
+    if contract_size_units <= 0.0:
+        contract_size_units = 1.0
+
     bt_cfg = BacktestConfig(
         symbols=list(symbols),
         initial_cash=float(cfg.initial_cash),
@@ -487,6 +504,8 @@ def _run_candidate_baseline(
         slippage_bps=float(cfg.baseline_slippage_bps),
         allow_short=bool(spec.allow_short),
         taker_fee_bps=float(cfg.baseline_taker_fee_bps),
+        fixed_fee_per_contract_usd=float(fixed_fee_per_contract_usd),
+        contract_size_units=float(contract_size_units),
     )
 
     if market == Market.DERIVATIVES:
@@ -631,6 +650,20 @@ def _run_candidate_validation(
 
     run_dir.mkdir(parents=True, exist_ok=True)
     scenario_rows: list[dict[str, Any]] = []
+    market = parse_market(spec.market)
+    coinbase_fee_active = bool(
+        cfg.use_coinbase_fee_model
+        and market == Market.DERIVATIVES
+        and str(source_used).strip().lower() == "coinbase"
+    )
+    fixed_fee_per_contract_usd = (
+        float(cfg.coinbase_fixed_fee_per_contract_usd) if coinbase_fee_active else 0.0
+    )
+    contract_size_units = (
+        float(cfg.coinbase_contract_size_units) if coinbase_fee_active else 1.0
+    )
+    if contract_size_units <= 0.0:
+        contract_size_units = 1.0
 
     for slip in cfg.stress_slippage_grid:
         for fee in cfg.stress_taker_fee_grid:
@@ -642,6 +675,8 @@ def _run_candidate_validation(
                 slippage_bps=float(slip),
                 allow_short=bool(spec.allow_short),
                 taker_fee_bps=float(fee),
+                fixed_fee_per_contract_usd=float(fixed_fee_per_contract_usd),
+                contract_size_units=float(contract_size_units),
             )
             result = walk_forward_evaluate(
                 bars_by_symbol=bars_by_symbol,

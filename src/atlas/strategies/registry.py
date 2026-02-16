@@ -32,6 +32,10 @@ from atlas.strategies.crypto_regime_vol_target import CryptoRegimeVolTarget
 from atlas.strategies.crypto_vol_squeeze import CryptoVolSqueeze
 from atlas.strategies.crypto_7d_positive_gate import Crypto7DPositiveGate
 from atlas.strategies.perp_quant_fusion import PerpQuantFusion
+from atlas.strategies.perp_research_vol_momentum import PerpResearchVolMomentum
+from atlas.strategies.perp_regime_adaptive_trend_capture import (
+    PerpRegimeAdaptiveTrendCapture,
+)
 from atlas.strategies.perp_trend_vol_guard import PerpTrendVolGuard
 from atlas.strategies.perp_weekly_carry_shield import PerpWeeklyCarryShield
 
@@ -108,6 +112,20 @@ def build_strategy(
         def _get_float(key: str, default: float) -> float:
             raw = params.get(key, params.get(key.lower(), default))
             return float(raw)
+
+        def _get_bool(key: str, default: bool) -> bool:
+            raw = params.get(key, params.get(key.lower(), default))
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, (int, float)):
+                return bool(int(raw))
+            if isinstance(raw, str):
+                return raw.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+            return bool(default)
+
+        def _get_str(key: str, default: str) -> str:
+            raw = params.get(key, params.get(key.lower(), default))
+            return str(raw)
 
         return NecX(
             spy=spy_symbol,
@@ -401,7 +419,7 @@ def build_strategy(
             use_stops=_get_bool("use_stops", False),
             rebalance_weekday_utc=_get_int("rebalance_weekday_utc", 0),
             rebalance_hour_utc=_get_int("rebalance_hour_utc", 0),
-            rebalance_minute_utc=_get_int("rebalance_minute_utc", 5),
+            rebalance_minute_utc=_get_int("rebalance_minute_utc", 0),
             weekly_nudge_exposure=_get_float("weekly_nudge_exposure", 0.002),
             min_trade_notional_usd=_get_float("min_trade_notional_usd", 10.0),
             heartbeat_exposure=_get_float("heartbeat_exposure", 0.03),
@@ -581,6 +599,173 @@ def build_strategy(
             heartbeat_minute_utc=_get_int("heartbeat_minute_utc", 5),
             heartbeat_exposure=_get_float("heartbeat_exposure", 0.01),
             heartbeat_hold_bars=_get_int("heartbeat_hold_bars", 1),
+        )
+
+    if name in {
+        "perp_research_vol_momentum",
+        "perp-research-vol-momentum",
+        "perp_research_vm",
+        "perp-research-vm",
+    }:
+        universe_symbols = [s.strip().upper() for s in symbols if s.strip()]
+        if not universe_symbols:
+            raise ValueError("perp_research_vol_momentum requires at least 1 symbol")
+
+        def _get_int(key: str, default: int) -> int:
+            raw = params.get(key, params.get(key.lower(), default))
+            return int(raw)
+
+        def _get_float(key: str, default: float) -> float:
+            raw = params.get(key, params.get(key.lower(), default))
+            return float(raw)
+
+        def _get_bool(key: str, default: bool) -> bool:
+            raw = params.get(key, params.get(key.lower(), default))
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, (int, float)):
+                return bool(int(raw))
+            if isinstance(raw, str):
+                return raw.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+            return bool(default)
+
+        def _get_str(key: str, default: str) -> str:
+            raw = params.get(key, params.get(key.lower(), default))
+            return str(raw)
+
+        def _get_int_list(key: str, default: tuple[int, ...]) -> tuple[int, ...]:
+            raw = params.get(key, params.get(key.lower(), default))
+            if raw is None:
+                return tuple(int(v) for v in default)
+            if isinstance(raw, (list, tuple)):
+                values = [int(v) for v in raw]
+                return tuple(values) if values else tuple(int(v) for v in default)
+            if isinstance(raw, str):
+                parts = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
+                if parts:
+                    return tuple(int(p) for p in parts)
+            return tuple(int(v) for v in default)
+
+        return PerpResearchVolMomentum(
+            symbols=tuple(universe_symbols),
+            rebalance_weekday_utc=_get_int("rebalance_weekday_utc", 0),
+            rebalance_days_utc=_get_int_list("rebalance_days_utc", (0,)),
+            rebalance_hour_utc=_get_int("rebalance_hour_utc", 0),
+            rebalance_minute_utc=_get_int("rebalance_minute_utc", 0),
+            long_momentum_bars=_get_int("long_momentum_bars", 24 * 14),
+            short_momentum_bars=_get_int("short_momentum_bars", 24 * 2),
+            ema_fast=_get_int("ema_fast", 24),
+            ema_slow=_get_int("ema_slow", 24 * 7),
+            atr_window=_get_int("atr_window", 24 * 2),
+            vol_lookback_bars=_get_int("vol_lookback_bars", 24 * 5),
+            vol_regime_window=_get_int("vol_regime_window", 24 * 30),
+            min_abs_long_momentum_bps=_get_float("min_abs_long_momentum_bps", 45.0),
+            min_atr_bps=_get_float("min_atr_bps", 8.0),
+            trend_strength_min=_get_float("trend_strength_min", 0.10),
+            edge_floor_bps=_get_float("edge_floor_bps", 8.0),
+            k_cost=_get_float("k_cost", 2.6),
+            expected_hold_bars=_get_int("expected_hold_bars", 120),
+            signal_decay_factor=_get_float("signal_decay_factor", 0.55),
+            min_net_edge_bps=_get_float("min_net_edge_bps", 18.0),
+            trend_consistency_min=_get_float("trend_consistency_min", 0.75),
+            trend_consistency_subwindows=_get_int("trend_consistency_subwindows", 4),
+            target_vol_per_bar=_get_float("target_vol_per_bar", 0.0065),
+            vol_floor=_get_float("vol_floor", 0.0020),
+            max_leverage=_get_float("max_leverage", 4.0),
+            max_margin_utilization=_get_float("max_margin_utilization", 0.40),
+            max_gross_exposure=_get_float("max_gross_exposure", 0.95),
+            max_per_symbol_exposure=_get_float("max_per_symbol_exposure", 0.95),
+            max_positions=_get_int("max_positions", 1),
+            min_trade_notional_usd=_get_float("min_trade_notional_usd", 25.0),
+            rebalance_exposure_threshold=_get_float("rebalance_exposure_threshold", 0.04),
+            vol_pctl_low=_get_float("vol_pctl_low", 0.15),
+            vol_pctl_high=_get_float("vol_pctl_high", 0.82),
+            crash_vol_z=_get_float("crash_vol_z", 1.25),
+            crash_reversal_bps=_get_float("crash_reversal_bps", 55.0),
+            crash_risk_scale=_get_float("crash_risk_scale", 0.30),
+            vol_off_z=_get_float("vol_off_z", 2.4),
+            stop_atr_mult=_get_float("stop_atr_mult", 3.2),
+            trail_atr_mult=_get_float("trail_atr_mult", 4.2),
+            min_hold_bars=_get_int("min_hold_bars", 24),
+            max_hold_bars=_get_int("max_hold_bars", 24 * 10),
+            max_loss_per_trade_pct=_get_float("max_loss_per_trade_pct", 0.015),
+            weekly_loss_limit=_get_float("weekly_loss_limit", 0.03),
+            daily_loss_limit=_get_float("daily_loss_limit", 0.02),
+            kill_switch=_get_float("kill_switch", 0.20),
+            mom_h1_bars=_get_int("mom_h1_bars", 48),
+            mom_h2_bars=_get_int("mom_h2_bars", 168),
+            mom_h3_bars=_get_int("mom_h3_bars", 504),
+            mom_h4_bars=_get_int("mom_h4_bars", 1512),
+            mom_w1=_get_float("mom_w1", 0.15),
+            mom_w2=_get_float("mom_w2", 0.25),
+            mom_w3=_get_float("mom_w3", 0.30),
+            mom_w4=_get_float("mom_w4", 0.30),
+            mom_z_scale=_get_float("mom_z_scale", 2.0),
+            mom_score_min=_get_float("mom_score_min", 0.20),
+            trend_regression_bars=_get_int("trend_regression_bars", 504),
+            trend_tstat_entry=_get_float("trend_tstat_entry", 2.2),
+            trend_tstat_full=_get_float("trend_tstat_full", 4.0),
+            trend_tstat_exit=_get_float("trend_tstat_exit", 1.0),
+            er_window_bars=_get_int("er_window_bars", 168),
+            er_min=_get_float("er_min", 0.28),
+            er_full=_get_float("er_full", 0.45),
+            vol_short_span=_get_int("vol_short_span", 48),
+            vol_long_span=_get_int("vol_long_span", 336),
+            vol_ratio_delever=_get_float("vol_ratio_delever", 1.25),
+            vol_ratio_off=_get_float("vol_ratio_off", 1.80),
+            vol_ratio_power=_get_float("vol_ratio_power", 1.5),
+            min_contracts=_get_int("min_contracts", 1),
+            qty_rounding=_get_str("qty_rounding", "floor"),
+            include_fixed_fee_in_cost=_get_bool("include_fixed_fee_in_cost", True),
+            mom_exit_score=_get_float("mom_exit_score", 0.12),
+            flip_exit_mom_score=_get_float("flip_exit_mom_score", 0.22),
+            cooldown_bars=_get_int("cooldown_bars", 24),
+            use_daily_loss_lockout=_get_bool("use_daily_loss_lockout", False),
+            use_weekly_loss_lockout=_get_bool("use_weekly_loss_lockout", False),
+        )
+
+    if name in {
+        "perp_regime_adaptive_trend_capture",
+        "perp-regime-adaptive-trend-capture",
+        "perp_ratc",
+        "perp-ratc",
+    }:
+        universe_symbols = [s.strip().upper() for s in symbols if s.strip()]
+        if not universe_symbols:
+            raise ValueError("perp_regime_adaptive_trend_capture requires at least 1 symbol")
+
+        def _get_int(key: str, default: int) -> int:
+            raw = params.get(key, params.get(key.lower(), default))
+            return int(raw)
+
+        def _get_float(key: str, default: float) -> float:
+            raw = params.get(key, params.get(key.lower(), default))
+            return float(raw)
+
+        return PerpRegimeAdaptiveTrendCapture(
+            symbols=tuple(universe_symbols),
+            mom_horizon_a=_get_int("mom_horizon_a", 168),
+            mom_horizon_b=_get_int("mom_horizon_b", 504),
+            mom_horizon_c=_get_int("mom_horizon_c", 1008),
+            ema_fast_regime=_get_int("ema_fast_regime", 72),
+            ema_slow_regime=_get_int("ema_slow_regime", 504),
+            bear_exit_bps=_get_float("bear_exit_bps", 120.0),
+            short_entry_bps=_get_float("short_entry_bps", 300.0),
+            cooldown_bars=_get_int("cooldown_bars", 168),
+            long_base_exposure=_get_float("long_base_exposure", 0.55),
+            short_base_exposure=_get_float("short_base_exposure", 0.35),
+            extreme_vol_scale=_get_float("extreme_vol_scale", 0.40),
+            high_vol_scale=_get_float("high_vol_scale", 0.70),
+            extreme_vol_rank=_get_float("extreme_vol_rank", 0.85),
+            high_vol_rank=_get_float("high_vol_rank", 0.75),
+            vol_lookback_bars=_get_int("vol_lookback_bars", 120),
+            vol_regime_window=_get_int("vol_regime_window", 720),
+            crash_threshold_bps=_get_float("crash_threshold_bps", 350.0),
+            max_hold_bars=_get_int("max_hold_bars", 2016),
+            rebalance_exposure_threshold=_get_float("rebalance_exposure_threshold", 0.02),
+            daily_loss_limit=_get_float("daily_loss_limit", 0.05),
+            weekly_loss_limit=_get_float("weekly_loss_limit", 0.07),
+            kill_switch=_get_float("kill_switch", 0.25),
         )
 
     if name in {
@@ -1501,6 +1686,8 @@ def list_strategy_names() -> list[str]:
         "perp_scalp",
         "perp_trend_vol_guard",
         "perp_quant_fusion",
+        "perp_research_vol_momentum",
+        "perp_regime_adaptive_trend_capture",
         "perp_weekly_carry_shield",
         "perp_weekly_trend_reset",
         "perp_weekly_profit_chase",

@@ -1,0 +1,26 @@
+{
+  "perp_regime_adaptive_trend_capture": {
+    "mom_horizon_a": 255,
+    "mom_horizon_b": 638,
+    "mom_horizon_c": 753,
+    "ema_fast_regime": 71,
+    "ema_slow_regime": 426,
+    "bear_exit_bps": 86.638,
+    "short_entry_bps": 430.0,
+    "cooldown_bars": 79,
+    "long_base_exposure": 0.43,
+    "short_base_exposure": 0.2,
+    "extreme_vol_scale": 0.29568000000000005,
+    "high_vol_scale": 0.5726448000000002,
+    "extreme_vol_rank": 0.861168,
+    "high_vol_rank": 0.6812960000000001,
+    "vol_lookback_bars": 56,
+    "vol_regime_window": 799,
+    "crash_threshold_bps": 520.7319040000001,
+    "max_hold_bars": 861,
+    "rebalance_exposure_threshold": 0.033264,
+    "daily_loss_limit": 0.0707,
+    "weekly_loss_limit": 0.148176,
+    "kill_switch": 0.3802
+  }
+}

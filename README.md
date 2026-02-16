@@ -150,9 +150,7 @@ The TUI provides an interactive dashboard where you can configure and run backte
 
 ### 4. Set Up Paper Trading (Optional)
 
-1. Create an [Alpaca](https://alpaca.markets/) account and enable paper trading
-2. Generate paper API keys in the Alpaca dashboard
-3. Copy `.env.example` to `.env` and configure:
+Alpaca execution path (equities/crypto):
 
 ```bash
 ALPACA_API_KEY=your_paper_key
@@ -160,9 +158,22 @@ ALPACA_SECRET_KEY=your_paper_secret
 ALPACA_PAPER=true
 ```
 
-Run the paper loop:
+Run the Alpaca paper loop:
 ```bash
 atlas paper --symbols SPY --strategy ma_crossover --fast-window 10 --slow-window 30
+```
+
+Coinbase execution path (crypto/derivatives):
+
+```bash
+COINBASE_API_KEY=your_coinbase_api_key
+COINBASE_API_SECRET=\"-----BEGIN EC PRIVATE KEY-----\\n...\\n-----END EC PRIVATE KEY-----\\n\"
+```
+
+By default, Coinbase venue starts in dry-run mode unless you pass `--no-dry-run`:
+
+```bash
+atlas paper --market derivatives --symbols BTC-PERP --data-source coinbase --execution-venue coinbase --strategy no_trade
 ```
 
 ---
@@ -195,6 +206,7 @@ The TUI is a full-featured terminal dashboard built with [Textual](https://githu
 | `/symbol` | Set a single symbol | `/symbol BTC/USD` |
 | `/symbols` | Set multiple symbols | `/symbols BTC/USD,ETH/USD` |
 | `/data` | Set data source | `/data coinbase` |
+| `/papervenue` | Set paper execution venue | `/papervenue coinbase` |
 | `/algorithm` | Select trading strategy | `/algorithm hedge` |
 | `/timeframe` | Set backtest window | `/timeframe 30d` |
 | `/bar` | Set bar timeframe | `/bar 5Min` |
@@ -240,7 +252,7 @@ Before running live, override `taker_fee_bps` to your account's current Coinbase
 /takerfee <your_current_coinbase_taker_bps>
 ```
 
-Note: `data_source=coinbase` is currently for market data/backtests. The built-in `/paper` execution path routes orders through Alpaca.
+For paper loops on Coinbase derivatives, set `data_source=coinbase` and `/papervenue coinbase`. `paperdry` defaults to `true` when switching venue for safety.
 
 ---
 
@@ -599,6 +611,9 @@ The optimizer:
 | `ALPACA_SECRET_KEY` | — | Alpaca secret key |
 | `ALPACA_PAPER` | `true` | Use paper trading endpoints |
 | `ATLAS_ALLOW_LIVE` | `false` | Must be `true` to disable paper mode |
+| `COINBASE_API_KEY` | — | Coinbase key id (required for `--execution-venue coinbase` with `--no-dry-run`) |
+| `COINBASE_API_SECRET` | — | Coinbase EC private key PEM used for JWT signing |
+| `COINBASE_PASSPHRASE` | — | Coinbase passphrase if required by your key type |
 | `ATLAS_LOG_LEVEL` | `INFO` | Logging verbosity |
 | `ATLAS_BACKTEST_MAX_POSITION_NOTIONAL_USD` | — | Max position size in backtests |
 | `ATLAS_PAPER_MAX_POSITION_NOTIONAL_USD` | — | Max position size in paper trading |
